@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { GitResult } from "./bootstrap/git.js";
 import type { SetupResult } from "./bootstrap/setup.js";
-import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
+import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
 import type { FieldError, Manifest } from "./manifest/types.js";
@@ -21,13 +21,13 @@ export type InitialiseResult =
   | { ok: false; already: true }
   | { ok: false; errors: FieldError[] };
 
-export class TaskRun<TAgent = unknown, TConfig = unknown> {
+export class TaskRun {
   readonly lifecycle = new Lifecycle();
   private serverHandle?: ServerHandle;
 
   constructor(
     private readonly deps: BootDeps,
-    private readonly adapter: EngineAdapter<TAgent, TConfig>,
+    private readonly registry: AdapterRegistry,
   ) {}
 
   async initialise(payload: unknown): Promise<InitialiseResult> {
@@ -36,7 +36,7 @@ export class TaskRun<TAgent = unknown, TConfig = unknown> {
       return { ok: false, already: true };
     }
 
-    const result = validate<TAgent>(payload, this.adapter);
+    const result = validate(payload, this.registry);
     if (!result.ok) {
       log.warn("initialise rejected: manifest validation failed", {
         errors: result.errors.map((e) => e.field),
@@ -46,14 +46,15 @@ export class TaskRun<TAgent = unknown, TConfig = unknown> {
 
     this.lifecycle.set("booting");
     log.info("initialise accepted; booting asynchronously", {
+      platform: result.manifest.platform,
       repos: result.manifest.repos.length,
       setupCommands: result.manifest.setup_commands.length,
     });
-    void this.boot(result.manifest);
+    void this.boot(result.manifest, result.adapter);
     return { ok: true, status: "booting" };
   }
 
-  private async boot(manifest: Manifest<TAgent>): Promise<void> {
+  private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
       this.lifecycle.set("cloning");
       log.info("boot step: cloning repos", { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
@@ -81,17 +82,17 @@ export class TaskRun<TAgent = unknown, TConfig = unknown> {
       }
 
       log.info("boot step: injecting credentials and building agent config");
-      this.adapter.injectCredentials(manifest);
+      adapter.injectCredentials(manifest);
       // The GitHub token reaches git subprocesses (incl. any the engine spawns).
       this.deps.injectGitCredentials(manifest.github_token);
 
-      const config = this.adapter.buildAgentConfig(manifest, primaryDest);
+      const config = adapter.buildAgentConfig(manifest, primaryDest);
       log.info("boot step: starting A2A server", { workingDirectory: primaryDest });
       try {
-        this.serverHandle = await this.adapter.createA2AServer(config);
+        this.serverHandle = await adapter.createA2AServer(config);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const step = this.adapter.classifyBootError?.(err, manifest) ?? "agent";
+        const step = adapter.classifyBootError?.(err, manifest) ?? "agent";
         throw new StepError(step, message);
       }
       this.lifecycle.set("ready");

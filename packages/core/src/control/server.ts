@@ -2,7 +2,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { clone, checkout } from "../bootstrap/git.js";
 import { runSetupCommands } from "../bootstrap/setup.js";
 import { injectGitCredentials } from "../bootstrap/git-credentials.js";
-import type { EngineAdapter } from "../engine/adapter.js";
+import type { AdapterRegistry } from "../engine/adapter.js";
 import { log } from "../log.js";
 import { TaskRun, type BootDeps } from "../task-run.js";
 import { checkInitToken } from "./init-token.js";
@@ -63,14 +63,14 @@ export function defaultBootDeps(): BootDeps {
   };
 }
 
-export function buildServer<TAgent, TConfig>(adapter: EngineAdapter<TAgent, TConfig>): Express {
-  return createControlApp({ taskRun: new TaskRun(defaultBootDeps(), adapter) });
+export function buildServer(registry: AdapterRegistry): Express {
+  return createControlApp({ taskRun: new TaskRun(defaultBootDeps(), registry) });
 }
 
-/** The variant entrypoint: `startControlServer(new MyEngineAdapter())`. */
-export function startControlServer<TAgent, TConfig>(adapter: EngineAdapter<TAgent, TConfig>): void {
+/** The app entrypoint: `startControlServer({ claude: new ClaudeEngineAdapter(), … })`. */
+export function startControlServer(registry: AdapterRegistry): void {
   const port = Number(process.env.CONTROL_PORT ?? 8080);
-  const app = buildServer(adapter);
+  const app = buildServer(registry);
   app.listen(port, "0.0.0.0", () => {
     log.info("control server listening", { port });
   });

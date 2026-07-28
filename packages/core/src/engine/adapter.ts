@@ -41,3 +41,10 @@ export interface EngineAdapter<TAgent = unknown, TConfig = unknown> {
    *  Returns undefined to accept core's default ("agent"). */
   classifyBootError?(err: unknown, manifest: Manifest<TAgent>): string | undefined;
 }
+
+/**
+ * A registry of engine adapters keyed by platform name (the `agent.platform`
+ * value). Values use `any` type args because the map is heterogeneous — each
+ * adapter is strongly typed internally, but they don't share a payload type.
+ */
+export type AdapterRegistry = Record<string, EngineAdapter<any, any>>;

@@ -2,6 +2,7 @@ export { startControlServer, buildServer, createControlApp, defaultBootDeps } fr
 export { TaskRun, type BootDeps, type InitialiseResult } from "./task-run.js";
 export { Lifecycle, type LifecycleState, type StatusView, type FailureDetail } from "./lifecycle.js";
 export { validate } from "./manifest/validate.js";
+export { resolveApiKey } from "./manifest/api-key.js";
 export type {
   RepoSpec,
   FieldError,
@@ -9,7 +10,7 @@ export type {
   Manifest,
   ValidateResult,
 } from "./manifest/types.js";
-export type { EngineAdapter, ServerHandle, AgentResult } from "./engine/adapter.js";
+export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export type { Env } from "./env.js";
 export { clone, checkout, type GitResult, ASKPASS } from "./bootstrap/git.js";
 export { runSetupCommands, type SetupResult } from "./bootstrap/setup.js";

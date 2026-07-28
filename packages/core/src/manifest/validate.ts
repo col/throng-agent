@@ -1,5 +1,5 @@
 import type { Env } from "../env.js";
-import type { EngineAdapter } from "../engine/adapter.js";
+import type { AdapterRegistry, EngineAdapter } from "../engine/adapter.js";
 import type { BaseManifest, FieldError, Manifest, RepoSpec, ValidateResult } from "./types.js";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -11,11 +11,11 @@ const blankToNil = (v: unknown): string | null =>
 const nonEmptyString = (v: unknown): string | null =>
   typeof v === "string" && v.trim() !== "" ? null : "must be a non-empty string";
 
-export function validate<TAgent>(
+export function validate(
   input: unknown,
-  adapter: EngineAdapter<TAgent>,
+  registry: AdapterRegistry,
   env: Env = process.env,
-): ValidateResult<TAgent> {
+): ValidateResult {
   if (!isObject(input)) {
     return { ok: false, errors: [{ field: "manifest", reason: "must be a JSON object" }] };
   }
@@ -23,15 +23,32 @@ export function validate<TAgent>(
 
   validateRepos(input.repos, errors);
 
-  // Engine-specific validation (agent block + engine credentials) is delegated.
-  const agentResult = adapter.validateAgent(input, env);
-  if (!agentResult.ok) errors.push(...agentResult.errors);
-
-  // Generic token fields (type-only). Engine credentials are the adapter's job.
-  for (const f of ["throng_api_token", "github_token"]) {
-    if (f in input && typeof input[f] !== "string") {
-      errors.push({ field: f, reason: "must be a string" });
+  // Routing: core reads exactly one reserved sub-field, agent.platform, to pick
+  // the adapter. Everything else in `agent` is the selected adapter's payload.
+  let adapter: EngineAdapter<any, any> | undefined;
+  if (!("agent" in input)) {
+    errors.push({ field: "agent", reason: "is required" });
+  } else if (!isObject(input.agent)) {
+    errors.push({ field: "agent", reason: "must be an object" });
+  } else {
+    const platform = input.agent.platform;
+    if (typeof platform !== "string" || !(platform in registry)) {
+      errors.push({
+        field: "agent.platform",
+        reason: `must be one of ${Object.keys(registry).join(", ")}`,
+      });
+    } else {
+      adapter = registry[platform];
     }
+  }
+
+  // Delegate the rest of the agent block to the selected adapter (only when one
+  // was resolved — otherwise the routing errors above already explain the 400).
+  const agentResult = adapter ? adapter.validateAgent(input, env) : undefined;
+  if (agentResult && !agentResult.ok) errors.push(...agentResult.errors);
+
+  if ("github_token" in input && typeof input.github_token !== "string") {
+    errors.push({ field: "github_token", reason: "must be a string" });
   }
 
   if ("setup_commands" in input) {
@@ -61,12 +78,13 @@ export function validate<TAgent>(
   }
   if (cross.length > 0) return { ok: false, errors: cross };
 
-  // agentResult is ok here for a well-behaved adapter (its errors would have
-  // returned above). Guard the invariant explicitly rather than assume it, so a
-  // misbehaving adapter that returns { ok: false, errors: [] } can't fall
-  // through to a silent `undefined` agent.
-  if (!agentResult.ok) return { ok: false, errors: agentResult.errors };
-  return { ok: true, manifest: buildManifest(input, repos, env, agentResult.agent) };
+  // adapter + agentResult are defined and ok here (errors would have returned
+  // above). Guard the invariant explicitly rather than assume it.
+  if (!adapter || !agentResult || !agentResult.ok) {
+    return { ok: false, errors: [{ field: "agent", reason: "could not be resolved" }] };
+  }
+  const platform = (input.agent as Record<string, unknown>).platform as string;
+  return { ok: true, manifest: buildManifest(input, repos, platform, agentResult.agent, env), adapter };
 }
 
 function validateRepos(value: unknown, errors: FieldError[]): void {
@@ -109,12 +127,13 @@ function validateRepos(value: unknown, errors: FieldError[]): void {
   });
 }
 
-function buildManifest<TAgent>(
+function buildManifest(
   input: Record<string, unknown>,
   repos: Array<Record<string, unknown>>,
+  platform: string,
+  agent: unknown,
   env: Env,
-  agent: TAgent,
-): Manifest<TAgent> {
+): Manifest {
   const defaultToken = blankToNil(input.github_token) ?? blankToNil(env.GITHUB_TOKEN);
   const specs: RepoSpec[] = repos.map((r) => ({
     url: r.url as string,
@@ -127,7 +146,6 @@ function buildManifest<TAgent>(
     repos: specs,
     github_token: defaultToken,
     setup_commands: (input.setup_commands as string[] | undefined) ?? [],
-    throng_api_token: blankToNil(input.throng_api_token) ?? blankToNil(env.THRONG_API_TOKEN),
   };
-  return { ...base, agent };
+  return { ...base, platform, agent };
 }
