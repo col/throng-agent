@@ -19,7 +19,7 @@ describe("publish config", () => {
   });
 
   it("variants pin core to an exact version", () => {
-    for (const v of ["throng-agent-claude", "throng-agent-codex"]) {
+    for (const v of ["throng-agent-claude", "throng-agent-codex", "throng-agent"]) {
       const pkg = read(`${v}/package.json`);
       expect(pkg.dependencies["@throng/agent-core"]).toMatch(/^\d+\.\d+\.\d+$/);
     }
