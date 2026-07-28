@@ -87,8 +87,10 @@ npm run changeset   # record a version bump / changelog entry
 
 ### Installing
 
-The `throng-agent-claude` variant depends on the private `@col/a2a-claude`
-package on GitHub Packages, so installs need a token with `read:packages`:
+The `throng-agent-claude` variant depends on `@col/a2a-claude`, published to
+GitHub Packages. GitHub Packages requires authentication for **all** npm
+downloads — even public packages — so installs need a token with `read:packages`
+regardless of the package's visibility:
 
 ```bash
 export GITHUB_TOKEN=$(gh auth token)
