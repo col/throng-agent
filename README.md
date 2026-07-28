@@ -99,5 +99,5 @@ npm ci
 
 ## Design & plan docs
 
-- Design spec: `throng_agent_claude/docs/superpowers/specs/2026-07-28-throng-agent-monorepo-design.md`
-- Implementation plan: `throng_agent_claude/docs/superpowers/plans/2026-07-28-throng-agent-monorepo.md`
+- Design spec: `docs/superpowers/specs/2026-07-28-throng-agent-monorepo-design.md`
+- Implementation plan: `docs/superpowers/plans/2026-07-28-throng-agent-monorepo.md`
