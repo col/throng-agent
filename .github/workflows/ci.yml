@@ -6,8 +6,8 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with: { node-version: "20", cache: "npm" }
       # throng-agent-claude depends on @col/a2a-claude, a private GitHub Packages
       # package. The committed .npmrc reads its auth token from $GITHUB_TOKEN, so
