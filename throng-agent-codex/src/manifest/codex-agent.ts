@@ -1,4 +1,4 @@
-import type { AgentResult, Env, FieldError } from "@throng/agent-core";
+import { resolveApiKey, type AgentResult, type Env, type FieldError } from "@throng/agent-core";
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
 const APPROVAL_POLICIES = new Set(["never", "on-request", "on-failure", "untrusted"]);
@@ -6,14 +6,10 @@ const APPROVAL_POLICIES = new Set(["never", "on-request", "on-failure", "untrust
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-const blankToNil = (v: unknown): string | null =>
-  typeof v === "string" && v.trim() !== "" ? v : null;
-
 /** The resolved, Codex-shaped agent payload stored on `manifest.agent`. */
 export interface ResolvedCodexAgent {
-  /** Raw agent keys (model, sandbox_mode, approval_policy, web_search_mode, etc.). */
   keys: Record<string, unknown>;
-  openai_api_key: string | null;
+  api_key: string | null;
 }
 
 export function validateCodexAgent(
@@ -43,19 +39,16 @@ export function validateCodexAgent(
         reason: "must be one of never/on-request/on-failure/untrusted",
       });
     }
-  }
-
-  if ("openai_api_key" in input && typeof input.openai_api_key !== "string") {
-    errors.push({ field: "openai_api_key", reason: "must be a string" });
+    if ("api_key" in a && typeof a.api_key !== "string") {
+      errors.push({ field: "agent.api_key", reason: "must be a string" });
+    }
   }
 
   if (errors.length > 0) return { ok: false, errors };
 
+  const a = (input.agent as Record<string, unknown>) ?? {};
   return {
     ok: true,
-    agent: {
-      keys: (input.agent as Record<string, unknown>) ?? {},
-      openai_api_key: blankToNil(input.openai_api_key) ?? blankToNil(env.OPENAI_API_KEY),
-    },
+    agent: { keys: a, api_key: resolveApiKey(a, env, ["OPENAI_API_KEY"]) },
   };
 }

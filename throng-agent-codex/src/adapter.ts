@@ -13,9 +13,9 @@ export class CodexEngineAdapter
   }
 
   injectCredentials(manifest: Manifest<ResolvedCodexAgent>): void {
-    injectOpenAIKey(manifest.agent.openai_api_key);
-    if (manifest.agent.openai_api_key === null) {
-      log.warn("no openai_api_key in manifest; agent requests will fail unless another auth path is configured");
+    injectOpenAIKey(manifest.agent.api_key);
+    if (manifest.agent.api_key === null) {
+      log.warn("no api_key in manifest; agent requests will fail unless another auth path is configured");
     }
   }
 

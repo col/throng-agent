@@ -13,7 +13,8 @@ describe("CodexEngineAdapter", () => {
     delete process.env.OPENAI_API_KEY;
     try {
       new CodexEngineAdapter().injectCredentials({
-        agent: { keys: {}, openai_api_key: "sk-c" },
+        platform: "codex",
+        agent: { keys: {}, api_key: "sk-c" },
       } as unknown as Manifest<ResolvedCodexAgent>);
       expect(process.env.OPENAI_API_KEY).toBe("sk-c");
     } finally {

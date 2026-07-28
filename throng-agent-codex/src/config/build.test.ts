@@ -7,8 +7,8 @@ const manifest = (keys: Record<string, unknown>): Manifest<ResolvedCodexAgent> =
   repos: [{ url: "https://x/y", ref: "main", dest: "app", primary: true, token: null }],
   github_token: null,
   setup_commands: [],
-  agent: { keys, openai_api_key: null },
-  throng_api_token: null,
+  platform: "codex",
+  agent: { keys, api_key: null },
 });
 
 describe("buildAgentConfig", () => {

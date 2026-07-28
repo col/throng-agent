@@ -12,22 +12,11 @@ describe("validateCodexAgent", () => {
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent")).toBe(true);
   });
 
-  it("resolves openai_api_key from env when absent", () => {
+  it("resolves api_key from agent.api_key then OPENAI_API_KEY", () => {
+    expect((validateCodexAgent({ agent: { api_key: "sk-in" } }, {}) as any).agent.api_key).toBe("sk-in");
     const r = validateCodexAgent({ agent: {} }, { OPENAI_API_KEY: "sk-env" });
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.openai_api_key).toBe("sk-env");
-  });
-
-  it("prefers input.openai_api_key over env", () => {
-    const r = validateCodexAgent({ agent: {}, openai_api_key: "sk-input" }, { OPENAI_API_KEY: "sk-env" });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.openai_api_key).toBe("sk-input");
-  });
-
-  it("resolves openai_api_key to null when neither input nor env has it", () => {
-    const r = validateCodexAgent({ agent: {} }, {});
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.openai_api_key).toBeNull();
+    if (r.ok) expect(r.agent.api_key).toBe("sk-env");
   });
 
   it("rejects a non-string model", () => {
@@ -58,10 +47,10 @@ describe("validateCodexAgent", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects a non-string openai_api_key", () => {
-    const r = validateCodexAgent({ agent: {}, openai_api_key: 5 }, {});
+  it("rejects a non-string agent.api_key", () => {
+    const r = validateCodexAgent({ agent: { api_key: 5 } }, {});
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.some((e) => e.field === "openai_api_key")).toBe(true);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.api_key")).toBe(true);
   });
 
   it("passes unknown agent keys through", () => {
