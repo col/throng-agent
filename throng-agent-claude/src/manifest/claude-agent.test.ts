@@ -13,15 +13,27 @@ describe("validateClaudeAgent", () => {
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.permission_mode")).toBe(true);
   });
 
-  it("resolves anthropic_api_key from env when absent", () => {
+  it("resolves api_key from agent.api_key", () => {
+    const r = validateClaudeAgent({ agent: { api_key: "sk-in" } }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.agent.api_key).toBe("sk-in");
+  });
+
+  it("falls back to ANTHROPIC_API_KEY when agent.api_key is absent", () => {
     const r = validateClaudeAgent({ agent: {} }, { ANTHROPIC_API_KEY: "sk-env" });
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.anthropic_api_key).toBe("sk-env");
+    if (r.ok) expect(r.agent.api_key).toBe("sk-env");
+  });
+
+  it("rejects a non-string agent.api_key", () => {
+    const r = validateClaudeAgent({ agent: { api_key: 5 } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.api_key")).toBe(true);
   });
 
   it("resolves plugins into channels", () => {
     const r = validateClaudeAgent(
-      { agent: { plugins: [{ path: "/opt/p" }] }, anthropic_api_key: "sk" },
+      { agent: { plugins: [{ path: "/opt/p" }], api_key: "sk" } },
       {},
     );
     expect(r.ok).toBe(true);

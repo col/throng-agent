@@ -24,7 +24,8 @@ describe("ClaudeEngineAdapter", () => {
     try {
       const a = new ClaudeEngineAdapter();
       a.injectCredentials({
-        agent: { keys: {}, plugins: { local: [], marketplaces: {}, enabledPlugins: {}, unpinned: [] }, anthropic_api_key: "sk-x" },
+        platform: "claude",
+        agent: { keys: {}, plugins: { local: [], marketplaces: {}, enabledPlugins: {}, unpinned: [] }, api_key: "sk-x" },
       } as unknown as Manifest<ResolvedClaudeAgent>);
       expect(process.env.ANTHROPIC_API_KEY).toBe("sk-x");
     } finally {

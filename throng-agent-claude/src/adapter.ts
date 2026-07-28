@@ -18,9 +18,9 @@ export class ClaudeEngineAdapter
 
   injectCredentials(manifest: Manifest<ResolvedClaudeAgent>): void {
     assertNoAnthropicKeyInSettings();
-    injectAnthropicKey(manifest.agent.anthropic_api_key);
-    if (manifest.agent.anthropic_api_key === null) {
-      log.warn("no anthropic_api_key in manifest; agent requests will fail unless another auth path is configured");
+    injectAnthropicKey(manifest.agent.api_key);
+    if (manifest.agent.api_key === null) {
+      log.warn("no api_key in manifest; agent requests will fail unless another auth path is configured");
     }
     const { marketplaces, local, unpinned, enabledPlugins } = manifest.agent.plugins;
     const marketplaceCount = Object.keys(marketplaces).length;

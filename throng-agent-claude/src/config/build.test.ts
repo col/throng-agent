@@ -11,8 +11,8 @@ const manifest = (
   repos: [{ url: "https://x/y", ref: "main", dest: "app", primary: true, token: null }],
   github_token: null,
   setup_commands: [],
-  agent: { keys, plugins, anthropic_api_key: null },
-  throng_api_token: null,
+  platform: "claude",
+  agent: { keys, plugins, api_key: null },
 });
 
 /** Resolves a manifest `agent.plugins` list, failing the test if invalid. */
