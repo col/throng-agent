@@ -11,14 +11,44 @@ launched into many different agent configurations without rebuilds or redeploys.
 
 Monorepo for Throng's A2A agent runtimes. A shared, published library
 (`@throng/agent-core`) owns the whole init pipeline once; each engine ships as a
-thin deployable variant that plugs its engine-specific behaviour into core
-through a single `EngineAdapter` seam.
+thin adapter library that plugs its engine-specific behaviour into core through a
+single `EngineAdapter` seam. A single deployable `throng-agent` image bundles
+every adapter into a registry and selects one per-`initialise` from
+`agent.platform` — the engine is a runtime choice, not a build-time one.
 
-One Node process per variant exposes two HTTP surfaces: a **control server**
+The `throng-agent` Node process exposes two HTTP surfaces: a **control server**
 (`CONTROL_PORT`, default `8080`) that boots warm and holds the lifecycle state
 machine, and an **A2A server** that starts only after a successful
-`POST /api/initialise` (validate manifest → clone repos → run setup → inject
-credentials → start the engine's A2A server).
+`POST /api/initialise` (validate manifest → select engine → clone repos → run
+setup → inject credentials → start the engine's A2A server).
+
+## The manifest
+
+`POST /api/initialise` takes a JSON manifest. `github_token` stays top-level (a
+workspace-provisioning concern); the engine is chosen inside `agent` via the
+required `platform` field, and the LLM credential is the generic `agent.api_key`
+(each adapter maps it onto its own SDK env var, e.g. `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY`, and falls back to that env var when `api_key` is omitted):
+
+```jsonc
+{
+  "repos": [
+    { "url": "https://github.com/acme/app", "ref": "main", "dest": "app", "primary": true }
+  ],
+  "setup_commands": ["npm ci"],
+  "github_token": "ghp_…",     // top-level; used to clone repos
+  "agent": {
+    "platform": "claude",      // required — selects the engine adapter (claude | codex)
+    "api_key": "sk-…",         // generic LLM key; the adapter maps it to its SDK env var
+    "model": "…",              // engine-specific
+    "permission_mode": "plan", // engine-specific (claude)
+    "plugins": []              // engine-specific (claude)
+  }
+}
+```
+
+A missing, non-string, or unregistered `agent.platform` fails closed with a `400`
+(`[{ field: "agent.platform", reason: "must be one of claude, codex" }]`).
 
 ## Relationship to a2a-wrapper
 
@@ -55,33 +85,51 @@ throng-agent-<engine>   ← manifest + /api/initialise control API  (this repo)
 | Path                    | Package                | Role |
 | ----------------------- | ---------------------- | ---- |
 | `packages/core`         | `@throng/agent-core`   | Shared init/manifest/control-API runtime. Owns the lifecycle state machine, the control HTTP API, git/setup bootstrap, generic manifest validation, boot orchestration, and the process entrypoint. Published to npm (public). |
-| `throng-agent-claude`   | `throng-agent-claude`  | Claude Code engine variant over [`@col/a2a-claude`](https://github.com/col/a2a-wrapper) — a temporary fork of `a2a-claude` (see [Relationship to a2a-wrapper](#relationship-to-a2a-wrapper)). Behavioural parity with the standalone `throng-agent-claude` repo. |
-| `throng-agent-codex`    | `throng-agent-codex`   | Codex engine variant over the upstream [`a2a-codex`](https://github.com/shashikanth-gs/a2a-wrapper/tree/main/a2a-codex). |
+| `throng-agent`          | `throng-agent`         | The deployable all-in-one image. Wires every engine adapter into a registry and selects one per-`initialise` via `agent.platform`. Owns the single Dockerfile; runtime `CMD` runs `throng-agent/dist/index.js`. |
+| `throng-agent-claude`   | `throng-agent-claude`  | Claude Code adapter **library** over [`@col/a2a-claude`](https://github.com/col/a2a-wrapper) — a temporary fork of `a2a-claude` (see [Relationship to a2a-wrapper](#relationship-to-a2a-wrapper)). Exports `ClaudeEngineAdapter`; consumed by the `throng-agent` app. |
+| `throng-agent-codex`    | `throng-agent-codex`   | Codex adapter **library** over the upstream [`a2a-codex`](https://github.com/shashikanth-gs/a2a-wrapper/tree/main/a2a-codex). Exports `CodexEngineAdapter`; consumed by the `throng-agent` app. |
 
 ### `@throng/agent-core`
 
 Core drives the entire init pipeline and is engine-agnostic. It validates the
-generic manifest skeleton (`repos`, `github_token`, `throng_api_token`,
-`setup_commands` and the cross-field repo rules), runs the generic boot steps
-(clone → checkout → setup → inject git credentials → build config → serve), and
-exposes the control API (`/healthz`, `GET /api/status`, `POST /api/initialise`).
-Engine-specific work is delegated to an adapter.
+generic manifest skeleton (`repos`, `github_token`, `setup_commands` and the
+cross-field repo rules), reads the one reserved sub-field `agent.platform` to
+route through the adapter registry, runs the generic boot steps (clone → checkout
+→ setup → inject git credentials → build config → serve), and exposes the control
+API (`/healthz`, `GET /api/status`, `POST /api/initialise`). Engine-specific work
+is delegated to the selected adapter.
 
-### Variants
+### The `throng-agent` app + engine registry
 
-A variant is small: it implements `EngineAdapter` for its engine and provides a
-one-line entrypoint that hands the adapter to core's `startControlServer`. For
-example, `throng-agent-claude/src/index.ts` is essentially:
+The engine is a **runtime** choice, not a build-time one: a single `throng-agent`
+image bundles every adapter and picks one per-`initialise` from `agent.platform`.
+The app wires the registry and hands it to core's `startControlServer`.
+`throng-agent/src/registry.ts` returns the registry:
+
+```ts
+import type { AdapterRegistry } from "@throng/agent-core";
+import { ClaudeEngineAdapter } from "throng-agent-claude";
+import { CodexEngineAdapter } from "throng-agent-codex";
+
+export function createRegistry(): AdapterRegistry {
+  return {
+    claude: new ClaudeEngineAdapter(),
+    codex: new CodexEngineAdapter(),
+  };
+}
+```
+
+and `throng-agent/src/index.ts` is the one-line entrypoint:
 
 ```ts
 import { startControlServer } from "@throng/agent-core";
-import { ClaudeEngineAdapter } from "./adapter.js";
+import { createRegistry } from "./registry.js";
 
-startControlServer(new ClaudeEngineAdapter());
+startControlServer(createRegistry()); // { claude, codex } keyed by agent.platform
 ```
 
-Variants pin `@throng/agent-core` to an exact version so a published core can't
-drift under them.
+The app and each adapter library pin `@throng/agent-core` to an exact version so a
+published core can't drift under them.
 
 ## The `EngineAdapter` extension point
 
@@ -103,15 +151,39 @@ server config. Core calls the adapter only for the engine-specific slices:
 
 ### Adding a new engine (e.g. Gemini)
 
-1. Create a `throng-agent-gemini/` package that depends on `@throng/agent-core`
-   (pinned exact) and its A2A library.
+1. Create a `throng-agent-gemini/` adapter **library** that depends on
+   `@throng/agent-core` (pinned exact) and its A2A library.
 2. Implement `EngineAdapter` in `throng-agent-gemini/src/adapter.ts`, plus an
-   agent-block validator that returns the resolved payload.
-3. Add the thin `startControlServer(new GeminiEngineAdapter())` entrypoint in
-   `src/index.ts`.
+   agent-block validator that returns the resolved payload, and export the adapter
+   from the package barrel (`src/index.ts`).
+3. Add it to the `throng-agent` app's `createRegistry()` under its platform key:
 
-No core changes are required — the workspace picks up any `throng-agent-*`
-directory automatically.
+   ```ts
+   return {
+     claude: new ClaudeEngineAdapter(),
+     codex: new CodexEngineAdapter(),
+     gemini: new GeminiEngineAdapter(),
+   };
+   ```
+
+No core changes are required — routing is data-driven off the registry keys, and
+the workspace picks up any `throng-agent*` directory automatically.
+
+### Per-engine image escape hatch
+
+The single all-in-one image is the default, but a lean single-engine image stays
+cheap to add later — no architectural change. Add a small package whose
+`index.ts` wires a one-key registry plus its own Dockerfile:
+
+```ts
+import { startControlServer } from "@throng/agent-core";
+import { ClaudeEngineAdapter } from "throng-agent-claude";
+
+startControlServer({ claude: new ClaudeEngineAdapter() });
+```
+
+Because the adapters remain standalone libraries, this reuses them as-is — no core
+or adapter changes.
 
 ## Workspace commands
 
