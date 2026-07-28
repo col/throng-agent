@@ -9,7 +9,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "20", cache: "npm" }
+      # throng-agent-claude depends on @col/a2a-claude, a private GitHub Packages
+      # package. The committed .npmrc reads its auth token from $GITHUB_TOKEN, so
+      # feed the read:packages PAT (repo secret PACKAGES_TOKEN) through that var
+      # for the install step. GitHub Packages requires auth for all npm
+      # downloads, even public packages.
       - run: npm ci
+        env:
+          GITHUB_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
       - run: npm run build
       - run: npm run typecheck
       - run: npm test
