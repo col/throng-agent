@@ -32,6 +32,8 @@ without an architectural change.
   removed).
 - The engine adapters stay separate library packages, so re-adding a per-engine
   image later is a ~5-line entrypoint + a Dockerfile, not a refactor.
+- The unused `throng_api_token` manifest field is removed (it was validated and
+  carried but never consumed); it can be re-added if/when something needs it.
 
 ## Manifest shape
 
@@ -40,7 +42,6 @@ without an architectural change.
   "repos": [ /* unchanged */ ],
   "setup_commands": [ /* unchanged */ ],
   "github_token": "…",       // unchanged, top-level (workspace provisioning)
-  "throng_api_token": "…",   // unchanged, top-level
   "agent": {
     "platform": "claude",    // NEW — required; selects the adapter
     "api_key": "sk-…",       // NEW — generic LLM key; adapter maps to its SDK env var
@@ -51,9 +52,9 @@ without an architectural change.
 }
 ```
 
-Removed: top-level `anthropic_api_key` and the codex `openai_api_key`.
-`github_token` / `throng_api_token` stay top-level — they are workspace/platform
-concerns, not the LLM credential.
+Removed: top-level `anthropic_api_key`, the codex `openai_api_key`, and the unused
+`throng_api_token`. `github_token` stays top-level — it is a workspace
+provisioning concern (repo/marketplace clones), not the LLM credential.
 
 Rationale for placing `platform` and `api_key` **inside `agent`**: they are part
 of the agent's definition, kept together with the engine's other options. Core
@@ -73,8 +74,9 @@ everything else in `agent` remains the selected adapter's opaque payload.
   3. Select `adapter = registry[platform]`.
   4. Delegate the rest of the `agent` block + generic key to
      `adapter.validateAgent(input, env)` exactly as today.
-  5. Generic manifest validation (repos, tokens, setup_commands, cross-field
-     rules) is unchanged.
+  5. Generic manifest validation (repos, `github_token`, setup_commands,
+     cross-field rules) is otherwise unchanged — except the `throng_api_token`
+     field, its `BaseManifest` member, and its env fallback are removed.
   6. On success return `{ ok: true, manifest, adapter }` — the resolved manifest
      plus the selected adapter, so boot doesn't re-look-up.
 - `Manifest<TAgent>` gains a resolved top-level `platform: string`. Core lifts the
@@ -145,8 +147,12 @@ manifest omits `api_key`.
 
 ### Workspace mechanics
 - The monorepo root `package.json` is renamed from `throng-agent` to
-  `throng-agent-monorepo` (npm workspaces require unique names; the deployable now
-  claims `throng-agent`). Root stays `private: true`.
+  `throng-agent-root` so the deployable app can claim `throng-agent`. (The name
+  collision is not a hard npm error — `-w throng-agent` still targets the app and
+  symlinks resolve — but a distinct root name avoids a confusing `npm ls` line and
+  any turbo duplicate-name warning.) The root name is internal only: it is never
+  published (root stays `private: true`) and is not the Docker image or deployable
+  name.
 - The `workspaces` glob becomes `["packages/*", "throng-agent*"]` so it matches
   the new `throng-agent/` app plus the `throng-agent-*` adapter libraries.
 
