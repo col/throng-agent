@@ -1,5 +1,14 @@
 # throng-agent
 
+`throng-agent` runs a coding agent (Claude Code, Codex, and more to come) as a
+long-lived service that is configured **at runtime, not at build time**. A
+container boots empty and warm; a single `POST /api/initialise` call then supplies
+everything the agent needs for a run — which repositories to clone, setup
+commands, credentials, and the agent's own settings (model, permission mode,
+tools, system prompt, plugins). Only after that does the A2A server start, bound
+to the freshly provisioned workspace. The payoff: one prebuilt image can be
+launched into many different agent configurations without rebuilds or redeploys.
+
 Monorepo for Throng's A2A agent runtimes. A shared, published library
 (`@throng/agent-core`) owns the whole init pipeline once; each engine ships as a
 thin deployable variant that plugs its engine-specific behaviour into core
