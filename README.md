@@ -11,13 +11,43 @@ machine, and an **A2A server** that starts only after a successful
 `POST /api/initialise` (validate manifest → clone repos → run setup → inject
 credentials → start the engine's A2A server).
 
+## Relationship to a2a-wrapper
+
+Throng doesn't implement the A2A protocol itself. Each variant embeds a
+per-platform wrapper library from
+**[a2a-wrapper](https://github.com/shashikanth-gs/a2a-wrapper)** — an upstream
+monorepo that provides spec-compliant A2A servers for a range of agent engines
+(`a2a-claude`, `a2a-codex`, `a2a-copilot`, `a2a-opencode`, `a2a-antigravity`, …),
+all built on a shared `@a2a-wrapper/core`. a2a-wrapper turns an engine into an
+A2A server; **throng-agent adds the layer above it** — the manifest schema and
+the `POST /api/initialise` control API that provision a workspace and configure
+the agent at boot.
+
+The stack per variant:
+
+```
+throng-agent-<engine>   ← manifest + /api/initialise control API  (this repo)
+  └─ a2a-<engine>       ← A2A protocol server for that engine     (a2a-wrapper)
+       └─ engine SDK    ← e.g. Claude Agent SDK, OpenAI Codex SDK
+```
+
+- **Codex** consumes the upstream `a2a-codex` package from npm directly.
+- **Claude** *temporarily* consumes `@col/a2a-claude`, published from a **fork**
+  ([col/a2a-wrapper](https://github.com/col/a2a-wrapper), branch
+  `feat/a2a-claude`), because Throng's changes to the Claude wrapper haven't been
+  merged upstream yet. Once they land in
+  [shashikanth-gs/a2a-wrapper](https://github.com/shashikanth-gs/a2a-wrapper),
+  this variant switches to the upstream `a2a-claude` package — at which point the
+  `@col` scope and its GitHub Packages token requirement (see
+  [Installing](#installing)) both go away.
+
 ## Packages
 
 | Path                    | Package                | Role |
 | ----------------------- | ---------------------- | ---- |
 | `packages/core`         | `@throng/agent-core`   | Shared init/manifest/control-API runtime. Owns the lifecycle state machine, the control HTTP API, git/setup bootstrap, generic manifest validation, boot orchestration, and the process entrypoint. Published to npm (public). |
-| `throng-agent-claude`   | `throng-agent-claude`  | Claude Code engine variant over [`@col/a2a-claude`](https://github.com/col/a2a-wrapper). Behavioural parity with the standalone `throng-agent-claude` repo. |
-| `throng-agent-codex`    | `throng-agent-codex`   | Codex engine variant over `a2a-codex` (working stub). |
+| `throng-agent-claude`   | `throng-agent-claude`  | Claude Code engine variant over [`@col/a2a-claude`](https://github.com/col/a2a-wrapper) — a temporary fork of `a2a-claude` (see [Relationship to a2a-wrapper](#relationship-to-a2a-wrapper)). Behavioural parity with the standalone `throng-agent-claude` repo. |
+| `throng-agent-codex`    | `throng-agent-codex`   | Codex engine variant over the upstream [`a2a-codex`](https://github.com/shashikanth-gs/a2a-wrapper/tree/main/a2a-codex). |
 
 ### `@throng/agent-core`
 
