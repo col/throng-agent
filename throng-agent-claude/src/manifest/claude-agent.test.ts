@@ -27,4 +27,22 @@ describe("validateClaudeAgent", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.agent.plugins.local).toHaveLength(1);
   });
+
+  it("accepts bypassPermissions as a permission mode", () => {
+    const r = validateClaudeAgent({ agent: { permission_mode: "bypassPermissions" } }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.agent.keys.permission_mode).toBe("bypassPermissions");
+  });
+
+  it("reports a bad plugin entry alongside other agent errors", () => {
+    const r = validateClaudeAgent(
+      { agent: { model: 5, plugins: [{}] } },
+      {},
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors.some((e) => e.field === "agent.model")).toBe(true);
+      expect(r.errors.some((e) => e.field.startsWith("agent.plugins["))).toBe(true);
+    }
+  });
 });

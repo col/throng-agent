@@ -43,6 +43,9 @@ export class ClaudeEngineAdapter
   }
 
   async createA2AServer(config: Required<AgentConfig>): Promise<ServerHandle> {
+    // Core's generic boot log can't know about permission mode; surface it here
+    // so operators keep the visibility the pre-monorepo boot log gave them.
+    log.info("starting Claude A2A server", { permissionMode: config.claude?.permissionMode });
     const handle: ClaudeServerHandle = await createA2AServer(config);
     return handle;
   }
