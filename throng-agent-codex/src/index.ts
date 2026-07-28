@@ -1,4 +1,2 @@
-import { startControlServer } from "@throng/agent-core";
-import { CodexEngineAdapter } from "./adapter.js";
-
-startControlServer(new CodexEngineAdapter());
+export { CodexEngineAdapter } from "./adapter.js";
+export type { ResolvedCodexAgent } from "./manifest/codex-agent.js";

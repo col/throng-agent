@@ -3,12 +3,15 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "clean": "rm -rf dist"
   },
   "dependencies": {
     "@throng/agent-core": "0.1.0",
