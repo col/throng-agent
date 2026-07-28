@@ -1,0 +1,45 @@
+name: Publish image
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derive image tags from the git tag: v1.2.3 -> 1.2.3, 1.2, and (for the
+      # highest non-prerelease) latest.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/col/throng-agent
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # context is the repo root (the Dockerfile COPYs the whole workspace).
+      # github_token build secret feeds the Dockerfile's `npm ci` so it can
+      # install the private @col/a2a-claude from GitHub Packages.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: throng-agent/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          secrets: |
+            github_token=${{ secrets.PACKAGES_TOKEN }}
