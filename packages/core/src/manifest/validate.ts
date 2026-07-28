@@ -61,9 +61,12 @@ export function validate<TAgent>(
   }
   if (cross.length > 0) return { ok: false, errors: cross };
 
-  // agentResult is ok here (errors would have returned above).
-  const agent = (agentResult as { ok: true; agent: TAgent }).agent;
-  return { ok: true, manifest: buildManifest(input, repos, env, agent) };
+  // agentResult is ok here for a well-behaved adapter (its errors would have
+  // returned above). Guard the invariant explicitly rather than assume it, so a
+  // misbehaving adapter that returns { ok: false, errors: [] } can't fall
+  // through to a silent `undefined` agent.
+  if (!agentResult.ok) return { ok: false, errors: agentResult.errors };
+  return { ok: true, manifest: buildManifest(input, repos, env, agentResult.agent) };
 }
 
 function validateRepos(value: unknown, errors: FieldError[]): void {
