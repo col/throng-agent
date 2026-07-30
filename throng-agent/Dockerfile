@@ -40,5 +40,10 @@ COPY --from=build /app/throng-agent-codex/package.json ./throng-agent-codex/pack
 COPY --from=build /app/throng-agent/dist ./throng-agent/dist
 COPY --from=build /app/throng-agent/package.json ./throng-agent/package.json
 ENV CONTROL_PORT=8080
+# node:20-slim (Debian 12) sets no LANG, so every process in the sandbox inherits
+# the `C` locale. That makes locale-sensitive toolchains misbehave on non-ASCII
+# paths and output. `C.UTF-8` is built into glibc >= 2.35, so it needs no 
+# `locales` package and no locale-gen.
+ENV LANG=C.UTF-8
 EXPOSE 8080 3030
 CMD ["node", "throng-agent/dist/index.js"]
