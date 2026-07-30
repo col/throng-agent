@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { GitResult } from "./bootstrap/git.js";
-import type { SetupResult } from "./bootstrap/setup.js";
+import { describeSetupFailure, type SetupResult } from "./bootstrap/setup.js";
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
@@ -78,7 +78,10 @@ export class TaskRun {
       log.info("boot step: running setup commands", { count: manifest.setup_commands.length, cwd: primaryDest });
       const setup = await this.deps.runSetupCommands(primaryDest, manifest.setup_commands);
       if (!setup.ok) {
-        throw new StepError("setup", `setup command failed: ${setup.command} (exit ${setup.code})`);
+        // `describeSetupFailure` carries the failing command, a decoded signal exit
+        // (137 = OOM-killed, the common one) and the tail of its output — without
+        // it the orchestrator only ever saw "(exit 137)" with no clue why.
+        throw new StepError("setup", describeSetupFailure(setup));
       }
 
       log.info("boot step: injecting credentials and building agent config");
