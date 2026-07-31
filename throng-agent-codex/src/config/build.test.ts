@@ -6,6 +6,7 @@ import type { ResolvedCodexAgent } from "../manifest/codex-agent.js";
 const manifest = (keys: Record<string, unknown>): Manifest<ResolvedCodexAgent> => ({
   repos: [{ url: "https://x/y", ref: "main", dest: "app", primary: true, token: null }],
   github_token: null,
+  user_identity: { name: null, email: null },
   setup_commands: [],
   platform: "codex",
   agent: { keys, api_key: null },

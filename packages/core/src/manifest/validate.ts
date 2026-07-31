@@ -51,6 +51,8 @@ export function validate(
     errors.push({ field: "github_token", reason: "must be a string" });
   }
 
+  validateUserIdentity(input.user_identity, errors);
+
   if ("setup_commands" in input) {
     const list = input.setup_commands;
     if (!Array.isArray(list)) {
@@ -127,6 +129,25 @@ function validateRepos(value: unknown, errors: FieldError[]): void {
   });
 }
 
+/**
+ * The optional `user_identity` block. Both fields are optional and the block
+ * itself may be omitted entirely — a manifest that sends neither behaves exactly
+ * as it did before the block existed. `undefined` means "not sent"; a wrong type
+ * is a 400 rather than something silently coerced, matching `github_token`.
+ */
+function validateUserIdentity(value: unknown, errors: FieldError[]): void {
+  if (value === undefined) return;
+  if (!isObject(value)) {
+    errors.push({ field: "user_identity", reason: "must be an object" });
+    return;
+  }
+  for (const key of ["name", "email"] as const) {
+    if (key in value && typeof value[key] !== "string") {
+      errors.push({ field: `user_identity.${key}`, reason: "must be a string" });
+    }
+  }
+}
+
 function buildManifest(
   input: Record<string, unknown>,
   repos: Array<Record<string, unknown>>,
@@ -142,9 +163,13 @@ function buildManifest(
     primary: r.primary as boolean,
     token: blankToNil(r.token) ?? defaultToken,
   }));
+  // A blank name/email is treated as absent, the same way a blank token is: git
+  // rejects an empty ident, so passing one through would only fail later.
+  const identity = isObject(input.user_identity) ? input.user_identity : {};
   const base: BaseManifest = {
     repos: specs,
     github_token: defaultToken,
+    user_identity: { name: blankToNil(identity.name), email: blankToNil(identity.email) },
     setup_commands: (input.setup_commands as string[] | undefined) ?? [],
   };
   return { ...base, platform, agent };

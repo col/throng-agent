@@ -10,6 +10,7 @@ const manifest = (
 ): Manifest<ResolvedClaudeAgent> => ({
   repos: [{ url: "https://x/y", ref: "main", dest: "app", primary: true, token: null }],
   github_token: null,
+  user_identity: { name: null, email: null },
   setup_commands: [],
   platform: "claude",
   agent: { keys, plugins, api_key: null },

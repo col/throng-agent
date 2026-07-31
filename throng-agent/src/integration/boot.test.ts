@@ -10,6 +10,7 @@ function fakeDeps(): BootDeps {
     checkout: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     injectGitCredentials: vi.fn(() => {}),
+    injectGitIdentity: vi.fn(() => {}),
     workspaceRoot: "/workspace",
   };
 }

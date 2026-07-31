@@ -1,7 +1,7 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { clone, checkout } from "../bootstrap/git.js";
 import { runSetupCommands } from "../bootstrap/setup.js";
-import { injectGitCredentials } from "../bootstrap/git-credentials.js";
+import { injectGitCredentials, injectGitIdentity } from "../bootstrap/git-credentials.js";
 import type { AdapterRegistry } from "../engine/adapter.js";
 import { log } from "../log.js";
 import { TaskRun, type BootDeps } from "../task-run.js";
@@ -59,6 +59,7 @@ export function defaultBootDeps(): BootDeps {
     checkout,
     runSetupCommands,
     injectGitCredentials,
+    injectGitIdentity,
     workspaceRoot: process.env.WORKSPACE_DIR ?? "/workspace",
   };
 }

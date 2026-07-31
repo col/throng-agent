@@ -28,7 +28,11 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
     { "url": "https://github.com/acme/app", "ref": "main", "dest": "app", "primary": true }
   ],
   "setup_commands": ["npm install"],
-  "github_token": "ghp_…",     // top-level; used to clone repos
+  "github_token": "ghp_…",     // top-level; clones repos and authenticates `gh`
+  "user_identity": {           // optional — the identity commits are made under
+    "name": "Throng Bot",
+    "email": "bot@throng.dev"
+  },
   "agent": {
     "platform": "claude",      // required — selects the engine adapter (claude | codex)
     "api_key": "sk-…",         // generic LLM key; the adapter maps it to its SDK env var
@@ -38,6 +42,24 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
   }
 }
 ```
+
+### `github_token` and `user_identity`
+
+- **`github_token`** clones the repos and authenticates the `gh` CLI (exported as
+  `GH_TOKEN`). It falls back to the `GITHUB_TOKEN` env var, and a blank string
+  counts as absent. A repo entry's own `token` still wins for that repo.
+- **`user_identity`** is optional, as are both of its fields. `name` and `email`
+  become the commit identity, exported as `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}` for
+  every command the agent runs. Without an identity from some source git refuses to
+  commit at all ("Author identity unknown"), and an agent will improvise one.
+  The field names mirror git's own `[user]` config section, which is what they
+  become — `name` rather than `username` deliberately, since in GitHub's vocabulary
+  a username is the account handle (`octocat`), not a display name.
+
+The two are independent: a commit identity is a git concept, unrelated to which
+token pushes the work, so a manifest may carry either, both, or neither. Nothing is
+written to `~/.gitconfig` — the identity, the git credential helper and `GH_TOKEN`
+all live in the process environment for the life of the sandbox.
 
 ## What's in the box?
 

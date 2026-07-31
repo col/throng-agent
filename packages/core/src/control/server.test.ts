@@ -10,6 +10,7 @@ const bootDeps: BootDeps = {
   checkout: async () => ({ ok: true, output: "" }),
   runSetupCommands: async () => ({ ok: true }),
   injectGitCredentials: () => {},
+  injectGitIdentity: () => {},
   workspaceRoot: "/workspace",
 };
 const adapter: EngineAdapter<any, any> = {

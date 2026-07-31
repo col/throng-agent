@@ -4,7 +4,7 @@ import { describeSetupFailure, type SetupResult } from "./bootstrap/setup.js";
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
-import type { FieldError, Manifest } from "./manifest/types.js";
+import type { FieldError, Manifest, UserIdentity } from "./manifest/types.js";
 import { validate } from "./manifest/validate.js";
 
 /** Engine-agnostic boot dependencies. */
@@ -13,6 +13,7 @@ export interface BootDeps {
   checkout: (dest: string, ref: string) => Promise<GitResult>;
   runSetupCommands: (cwd: string, commands: string[]) => Promise<SetupResult>;
   injectGitCredentials: (token: string | null) => void;
+  injectGitIdentity: (identity: UserIdentity) => void;
   workspaceRoot: string;
 }
 
@@ -86,8 +87,10 @@ export class TaskRun {
 
       log.info("boot step: injecting credentials and building agent config");
       adapter.injectCredentials(manifest);
-      // The GitHub token reaches git subprocesses (incl. any the engine spawns).
+      // GitHub auth (git + gh) and the commit identity reach every subprocess the
+      // engine spawns, via this process's environment.
       this.deps.injectGitCredentials(manifest.github_token);
+      this.deps.injectGitIdentity(manifest.user_identity);
 
       const config = adapter.buildAgentConfig(manifest, primaryDest);
       log.info("boot step: starting A2A server", { workingDirectory: primaryDest });

@@ -13,10 +13,25 @@ export interface FieldError {
   reason: string;
 }
 
+/**
+ * The identity commits are made under. Fields mirror git's own `[user]` config
+ * section, which is exactly what they become. Deliberately not `username`: in
+ * GitHub's vocabulary that is the account handle (`octocat`), not a display name.
+ *
+ * Separate from the GitHub credential on purpose — a commit identity is a git
+ * concept, unrelated to which forge (or token) the work is pushed with. Each field
+ * is resolved to `string | null`, so consumers never re-derive "was this sent?".
+ */
+export interface UserIdentity {
+  name: string | null;
+  email: string | null;
+}
+
 /** Engine-agnostic manifest skeleton owned by core. */
 export interface BaseManifest {
   repos: RepoSpec[];
   github_token: string | null;
+  user_identity: UserIdentity;
   setup_commands: string[];
 }
 
