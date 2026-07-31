@@ -29,6 +29,25 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends mise \
  && rm -rf /var/lib/apt/lists/*
+# GitHub CLI. Agents reach for `gh pr create`; without it they fall back to
+# hand-rolled curl calls against api.github.com, scraping the token out of git's
+# credential helper to do it (observed in a live run).
+#
+# Installed system-wide into /usr/local/bin, which is on the image's default PATH
+# — so unlike mise's user-local shims this needs no /etc/profile.d wiring to reach
+# the shells the agent spawns. Pinned rather than apt-sourced: the image is the
+# unit of promotion (DEV_VERSION/PROD_VERSION), so a rebuild of "the same" version
+# must not quietly pick up a different gh. `dpkg --print-architecture` keeps a
+# local arm64 build working even though E2B runs amd64; the final `gh --version`
+# turns a bad URL into a failed build instead of a missing binary at runtime.
+ARG GH_VERSION=2.96.0
+RUN arch="$(dpkg --print-architecture)" \
+ && wget -qO /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" \
+ && tar -xzf /tmp/gh.tar.gz -C /tmp \
+ && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh \
+ && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${arch}" \
+ && gh --version
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/packages/core/dist ./packages/core/dist
