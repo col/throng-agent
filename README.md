@@ -38,10 +38,25 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
     "api_key": "sk-…",         // generic LLM key; the adapter maps it to its SDK env var
     "model": "…",              // engine-specific
     "permission_mode": "plan", // engine-specific (claude)
+    "thinking": { "type": "adaptive" }, // engine-specific (claude)
+    "effort": "high",          // engine-specific (claude)
     "plugins": []              // engine-specific (claude)
   }
 }
 ```
+
+### `thinking` and `effort` (claude)
+
+- **`thinking`** is optional. It controls extended thinking on the Claude
+  model and is passed through as-is. It takes one of three shapes:
+  - `{ "type": "adaptive" }`
+  - `{ "type": "disabled" }`
+  - `{ "type": "enabled", "budget_tokens": 4096 }` — the legacy
+    extended-thinking shape (`budget_tokens` must be an integer `>= 1024`).
+    Current models (Opus 4.7/4.8, Sonnet 5, Fable 5) reject this form; they
+    use `adaptive` together with `effort` instead.
+- **`effort`** is optional and sets the reasoning effort level: one of
+  `low`, `medium`, `high`, `xhigh`, `max`.
 
 ### `github_token` and `user_identity`
 
