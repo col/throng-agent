@@ -138,4 +138,35 @@ describe("buildAgentConfig", () => {
       else process.env.ADVERTISE_PROTOCOL = prev;
     }
   });
+
+  it("maps effort onto claude.model.effort", () => {
+    const cfg = buildAgentConfig(manifest({ model: "claude-opus-4-8", effort: "xhigh" }), "/work/app");
+    expect(cfg.claude.model.effort).toBe("xhigh");
+  });
+
+  it("maps adaptive thinking onto claude.model.thinking", () => {
+    const cfg = buildAgentConfig(
+      manifest({ model: "claude-opus-4-8", thinking: { type: "adaptive" } }),
+      "/work/app",
+    );
+    expect(cfg.claude.model.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("renames budget_tokens to budgetTokens for enabled thinking", () => {
+    const cfg = buildAgentConfig(
+      manifest({ thinking: { type: "enabled", budget_tokens: 8000 } }),
+      "/work/app",
+    );
+    expect(cfg.claude.model.thinking).toEqual({ type: "enabled", budgetTokens: 8000 });
+  });
+
+  it("creates the model group from thinking/effort even without a model name", () => {
+    const cfg = buildAgentConfig(
+      manifest({ thinking: { type: "disabled" }, effort: "low" }),
+      "/work/app",
+    );
+    expect(cfg.claude.model.name).toBeUndefined();
+    expect(cfg.claude.model.thinking).toEqual({ type: "disabled" });
+    expect(cfg.claude.model.effort).toBe("low");
+  });
 });

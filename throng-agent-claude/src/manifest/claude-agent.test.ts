@@ -57,4 +57,57 @@ describe("validateClaudeAgent", () => {
       expect(r.errors.some((e) => e.field.startsWith("agent.plugins["))).toBe(true);
     }
   });
+
+  it("accepts a valid effort level", () => {
+    const r = validateClaudeAgent({ agent: { effort: "high" } }, {});
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects an unknown effort level", () => {
+    const r = validateClaudeAgent({ agent: { effort: "turbo" } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.effort")).toBe(true);
+  });
+
+  it("accepts adaptive and disabled thinking", () => {
+    for (const type of ["adaptive", "disabled"]) {
+      const r = validateClaudeAgent({ agent: { thinking: { type } } }, {});
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  it("accepts enabled thinking with a budget", () => {
+    const r = validateClaudeAgent({ agent: { thinking: { type: "enabled", budget_tokens: 2048 } } }, {});
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects an unknown thinking type", () => {
+    const r = validateClaudeAgent({ agent: { thinking: { type: "hard" } } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking")).toBe(true);
+  });
+
+  it("rejects non-object thinking", () => {
+    const r = validateClaudeAgent({ agent: { thinking: "adaptive" } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking")).toBe(true);
+  });
+
+  it("rejects enabled thinking without a numeric budget", () => {
+    const r = validateClaudeAgent({ agent: { thinking: { type: "enabled" } } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking.budget_tokens")).toBe(true);
+  });
+
+  it("rejects enabled thinking with a budget below 1024", () => {
+    const r = validateClaudeAgent({ agent: { thinking: { type: "enabled", budget_tokens: 500 } } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking.budget_tokens")).toBe(true);
+  });
+
+  it("rejects enabled thinking with a non-integer budget", () => {
+    const r = validateClaudeAgent({ agent: { thinking: { type: "enabled", budget_tokens: 1500.5 } } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking.budget_tokens")).toBe(true);
+  });
 });

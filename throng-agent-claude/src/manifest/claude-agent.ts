@@ -2,6 +2,8 @@ import { resolveApiKey, type AgentResult, type Env, type FieldError } from "@thr
 import { EMPTY_PLUGINS, resolvePlugins, type ResolvedPlugins } from "../config/plugins.js";
 
 const PERMISSION_MODES = new Set(["acceptEdits", "dontAsk", "plan", "bypassPermissions"]);
+const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const THINKING_TYPES = new Set(["adaptive", "disabled", "enabled"]);
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -38,6 +40,26 @@ export function validateClaudeAgent(
     }
     if ("api_key" in a && typeof a.api_key !== "string") {
       errors.push({ field: "agent.api_key", reason: "must be a string" });
+    }
+    if ("effort" in a && !EFFORT_LEVELS.has(a.effort as string)) {
+      errors.push({ field: "agent.effort", reason: "must be one of low/medium/high/xhigh/max" });
+    }
+    if ("thinking" in a) {
+      const t = a.thinking;
+      if (!isObject(t) || !THINKING_TYPES.has(t.type as string)) {
+        errors.push({
+          field: "agent.thinking",
+          reason: "must be an object with type adaptive/disabled/enabled",
+        });
+      } else if (
+        t.type === "enabled" &&
+        (typeof t.budget_tokens !== "number" || !Number.isInteger(t.budget_tokens) || t.budget_tokens < 1024)
+      ) {
+        errors.push({
+          field: "agent.thinking.budget_tokens",
+          reason: "must be an integer >= 1024 when type is enabled",
+        });
+      }
     }
     const resolution = resolvePlugins(a.plugins);
     if (resolution.ok) plugins = resolution.resolved;

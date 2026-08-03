@@ -1,4 +1,4 @@
-import { resolveConfig, type AgentConfig, type ClaudePermissionMode } from "@col/a2a-claude";
+import { resolveConfig, type AgentConfig, type ClaudeConfig, type ClaudePermissionMode } from "@col/a2a-claude";
 import type { Manifest } from "@throng/agent-core";
 import type { ResolvedClaudeAgent } from "../manifest/claude-agent.js";
 
@@ -32,7 +32,25 @@ export function buildAgentConfig(
     settingSources: ["project"],
   };
 
-  if (typeof a.model === "string") claude.model = { name: a.model };
+  // Model group: the model name plus the reasoning controls (thinking/effort)
+  // that a2a-claude nests inside ClaudeModelConfig. Accumulate, then attach only
+  // if something was set — an absent model still falls through to the wrapper
+  // default, and thinking/effort work even without an explicit model name.
+  const model: NonNullable<ClaudeConfig["model"]> = {};
+  if (typeof a.model === "string") model.name = a.model;
+  if (a.thinking && typeof a.thinking === "object") {
+    const t = a.thinking as Record<string, unknown>;
+    // The `enabled` form renames snake_case budget_tokens -> the SDK's
+    // budgetTokens; adaptive/disabled carry only `type`.
+    model.thinking =
+      t.type === "enabled"
+        ? { type: "enabled", budgetTokens: t.budget_tokens as number }
+        : { type: t.type as "adaptive" | "disabled" };
+  }
+  if (typeof a.effort === "string") {
+    model.effort = a.effort as NonNullable<ClaudeConfig["model"]>["effort"];
+  }
+  if (Object.keys(model).length > 0) claude.model = model;
   if (typeof a.permission_mode === "string") {
     claude.permissionMode = a.permission_mode as ClaudePermissionMode;
     // bypassPermissions grants Claude unrestricted tool access; the SDK requires
