@@ -48,7 +48,7 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
 ### `thinking` and `effort` (claude)
 
 - **`thinking`** is optional. It controls extended thinking on the Claude
-  model and is passed through as-is. It takes one of three shapes:
+  model. It takes one of three shapes:
   - `{ "type": "adaptive" }`
   - `{ "type": "disabled" }`
   - `{ "type": "enabled", "budget_tokens": 4096 }` — the legacy

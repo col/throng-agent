@@ -104,4 +104,10 @@ describe("validateClaudeAgent", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking.budget_tokens")).toBe(true);
   });
+
+  it("rejects enabled thinking with a non-integer budget", () => {
+    const r = validateClaudeAgent({ agent: { thinking: { type: "enabled", budget_tokens: 1500.5 } } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking.budget_tokens")).toBe(true);
+  });
 });

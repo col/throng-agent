@@ -51,10 +51,13 @@ export function validateClaudeAgent(
           field: "agent.thinking",
           reason: "must be an object with type adaptive/disabled/enabled",
         });
-      } else if (t.type === "enabled" && (typeof t.budget_tokens !== "number" || t.budget_tokens < 1024)) {
+      } else if (
+        t.type === "enabled" &&
+        (typeof t.budget_tokens !== "number" || !Number.isInteger(t.budget_tokens) || t.budget_tokens < 1024)
+      ) {
         errors.push({
           field: "agent.thinking.budget_tokens",
-          reason: "must be a number >= 1024 when type is enabled",
+          reason: "must be an integer >= 1024 when type is enabled",
         });
       }
     }
