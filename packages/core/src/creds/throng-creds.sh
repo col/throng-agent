@@ -24,10 +24,36 @@ SKEW=300              # serve_until = expires_at - SKEW
 # again: a changed static token cannot appear in a running sandbox, so a cache
 # entry minted from it can never go stale relative to its source.
 STATIC_TTL=315360000
+LOCK_TICKS=75         # × 0.2s = 15s before giving up on the lock
 
 warn() { printf 'throng-creds: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
 now()  { date +%s; }
+
+# git_erase removes this directory whole, as root in production, and lock
+# directories live in it too — so a mis-set THRONG_CREDS_CACHE is an `rm -rf` on
+# whatever it names. `${CACHE_DIR:?}` only rejects empty/unset, never a
+# dangerous *value*; these checks reject the value. Nothing can make an
+# arbitrary path safe, but `/`, a bare top-level directory, and anything
+# reachable by traversal are the ones that end a machine.
+CACHE_DIR_RAW="$CACHE_DIR"          # only ever used to quote back what was set
+# Trailing slashes go first: "/cache/" has the same parent as "/run/cache" and
+# would otherwise walk straight past the depth check below.
+while [ "$CACHE_DIR" != "/" ] && [ "$CACHE_DIR" != "${CACHE_DIR%/}" ]; do
+  CACHE_DIR="${CACHE_DIR%/}"
+done
+case "$CACHE_DIR" in
+  /*) ;;
+  *)  die "THRONG_CREDS_CACHE must be an absolute path, got '$CACHE_DIR_RAW'." ;;
+esac
+case "$CACHE_DIR" in
+  */.|*/..|*/./*|*/../*)
+      die "THRONG_CREDS_CACHE must not contain '.' or '..', got '$CACHE_DIR_RAW'." ;;
+esac
+# Two segments minimum: "/", "/cache" and "/tmp" are all refused, "/run/throng/cache" is not.
+case "${CACHE_DIR%/*}" in
+  ''|/) die "refusing '$CACHE_DIR_RAW' as the cache directory: too close to the filesystem root, and 'git credential erase' deletes it whole." ;;
+esac
 
 # REPLY <- the cache file for a canonical key. Sanitising can collide
 # ("acme/app" and "acme_app" both become "acme_app"), which is why every entry
@@ -71,6 +97,38 @@ write_cache() { # $1=key $2=serve_until $3=username $4=token $5=password_expiry
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null
   mv -f "$tmp" "$file"
+}
+
+# Single-flight. `mkdir` is atomic on every POSIX filesystem, needs no
+# util-linux (flock is absent on macOS, where these tests run), and has no
+# stale-lock case to reason about because the wait is bounded: after LOCK_TICKS
+# we proceed anyway. A duplicate API call is a far better outcome than a git
+# operation that stalls behind a lock whose owner died.
+LOCK_DIR=""
+acquire_lock() { # $1 = canonical key
+  local lock ticks=0
+  cache_file "$1"; lock="$REPLY.lock"
+  mkdir -p "$CACHE_DIR" 2>/dev/null
+  while ! mkdir "$lock" 2>/dev/null; do
+    # mkdir also fails for reasons waiting cannot fix — an unwritable or
+    # uncreatable cache directory. Only an existing lock means another process
+    # is minting, so only that is worth sleeping on; otherwise every single
+    # credential lookup would stall the full 15s before declining.
+    [ -d "$lock" ] || return 0
+    if [ "$ticks" -ge "$LOCK_TICKS" ]; then
+      warn "proceeding without the single-flight lock"
+      return 0
+    fi
+    sleep 0.2
+    ticks=$((ticks + 1))
+  done
+  LOCK_DIR="$lock"
+  trap 'release_lock' EXIT
+}
+
+release_lock() {
+  [ -n "$LOCK_DIR" ] && rmdir "$LOCK_DIR" 2>/dev/null
+  LOCK_DIR=""
 }
 
 # REPLY <- a request id. /proc is Linux-only and the test suite runs on macOS.
@@ -204,8 +262,19 @@ resolve() { # $1=key $2=purpose $3=host $4=repo (may be empty)
 # Returns 1 to decline.
 credential() { # $1=key $2=purpose $3=host $4=repo (may be empty)
   read_fresh "$1" && return 0
-  resolve "$@" || return 1
-  read_fresh "$1"
+
+  acquire_lock "$1"
+  # The process that held the lock may have just filled the cache. Re-check
+  # before spending an API call.
+  if read_fresh "$1"; then release_lock; return 0; fi
+
+  if resolve "$@"; then
+    release_lock
+    read_fresh "$1"
+    return $?
+  fi
+  release_lock
+  return 1
 }
 
 git_get() {
@@ -253,9 +322,9 @@ gh_token() {
     case "$line" in
       password=*) printf '%s\n' "${line#password=}"; return 0 ;;
     esac
-  done <<EOF
-$out
-EOF
+  # A here-string, not a here-doc: a here-doc ends at a line that is literally
+  # its delimiter, and $out is server-derived.
+  done <<<"$out"
   return 0
 }
 

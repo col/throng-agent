@@ -35,7 +35,12 @@ afterAll(() => {
   for (const dir of tmpRoots) rmSync(dir, { recursive: true, force: true });
 });
 
-/** Spawn the real script. `bash` from PATH is bash 3.2 on macOS — deliberate. */
+/**
+ * Spawn the real script with whatever `bash` PATH resolves to — commonly a
+ * Homebrew bash 5.x, not the macOS system bash 3.2. The script is *written* to
+ * 3.2, so a green run here is not evidence of 3.2 compatibility; that has to be
+ * verified separately against /bin/bash.
+ */
 export function run(
   dir: string,
   args: string[],
@@ -578,4 +583,22 @@ describe("throng-creds credentials API", () => {
     expect(r.stderr).toContain("too soon to use");
     expect(existsSync(join(dir, "cache", "git_github.com_acme_app"))).toBe(false);
   });
+});
+
+describe("throng-creds single-flight", () => {
+  it("makes exactly one API call when several git operations miss at once", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_shared", isoIn(3600)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") }),
+      ),
+    );
+
+    // All five get a credential; only one of them paid for it.
+    for (const r of results) expect(r.stdout).toContain("password=ghs_shared");
+    expect(stub.requests).toHaveLength(1);
+  }, 30_000);
 });
