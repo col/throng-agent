@@ -27,7 +27,9 @@ export function writeCredentialConfig(manifest: BaseManifest, path = CONFIG_PATH
 
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  // writeFileSync's mode applies only when it creates the file; an existing one
-  // keeps whatever it had.
+  // Both `mode` options apply only when the call CREATES the thing; an existing
+  // directory or file keeps whatever bits it had. Since this file holds a live
+  // token, chmod both unconditionally rather than trusting that we made them.
+  chmodSync(dirname(path), 0o700);
   chmodSync(path, 0o600);
 }

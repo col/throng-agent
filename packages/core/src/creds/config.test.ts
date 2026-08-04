@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { writeCredentialConfig } from "./config.js";
 import type { BaseManifest } from "../manifest/types.js";
@@ -60,6 +60,32 @@ describe("writeCredentialConfig", () => {
 
   it("creates the directory and keeps the file private", () => {
     const path = target();
+    writeCredentialConfig(manifest({ github_token: "ghp_static" }), path);
+
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
+  });
+
+  // mkdirSync's `mode` applies only when it creates the directory — exactly the
+  // limitation writeFileSync has, and the reason the file gets a follow-up chmod.
+  // A pre-existing /run/throng with looser bits would otherwise leave the token
+  // file readable to anyone who can traverse the directory.
+  it("tightens an existing directory that was created world-readable", () => {
+    const path = target();
+    mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
+    expect(statSync(dirname(path)).mode & 0o777).toBe(0o755);
+
+    writeCredentialConfig(manifest({ github_token: "ghp_static" }), path);
+
+    expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
+  });
+
+  // Same asymmetry on the file side, already guarded — pinned so it stays that way.
+  it("tightens an existing config file that was created world-readable", () => {
+    const path = target();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, "{}\n", { mode: 0o644 });
+
     writeCredentialConfig(manifest({ github_token: "ghp_static" }), path);
 
     expect(statSync(path).mode & 0o777).toBe(0o600);

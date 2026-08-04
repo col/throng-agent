@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { describeSetupFailure, runSetupCommands } from "./setup.js";
+import { describeSetupFailure, redactTokens, runSetupCommands } from "./setup.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "a2a-setup-"));
 
@@ -89,5 +89,43 @@ describe("describeSetupFailure", () => {
     expect(message).toContain("THE-ACTUAL-ERROR");
     expect(message).toMatch(/earlier chars omitted/);
     expect(message.length).toBeLessThan(2500);
+  });
+});
+
+describe("token redaction", () => {
+  it("redacts every GitHub token prefix", () => {
+    const text = [
+      "ghp_0123456789abcdefghij",
+      "ghs_0123456789abcdefghij",
+      "gho_0123456789abcdefghij",
+      "ghu_0123456789abcdefghij",
+      "ghr_0123456789abcdefghij",
+    ].join(" ");
+
+    const out = redactTokens(text);
+
+    expect(out).not.toMatch(/gh[pousr]_/);
+    expect(out.match(/\[REDACTED\]/g)).toHaveLength(5);
+  });
+
+  it("leaves ordinary output alone", () => {
+    const text = "npm ERR! missing script: buidl\nat github.com/acme/app";
+    expect(redactTokens(text)).toBe(text);
+  });
+
+  // This text is stored verbatim in the control plane's instance.error_message.
+  // Setup commands now run with live credentials, so a command echoing its
+  // environment would otherwise persist a minted token.
+  it("redacts inside a setup failure message", () => {
+    const message = describeSetupFailure({
+      ok: false,
+      command: "env",
+      code: 1,
+      signal: null,
+      output: "GH_TOKEN=ghs_0123456789abcdefghij\n",
+    });
+
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("ghs_0123456789abcdefghij");
   });
 });
