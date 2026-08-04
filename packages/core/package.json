@@ -8,7 +8,7 @@
   "main": "./dist/index.js",
   "files": ["dist"],
   "scripts": {
-    "build": "tsc && cp src/bootstrap/askpass.sh dist/bootstrap/askpass.sh && chmod +x dist/bootstrap/askpass.sh",
+    "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest --run",
     "clean": "rm -rf dist"

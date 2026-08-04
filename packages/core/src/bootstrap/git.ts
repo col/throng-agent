@@ -1,7 +1,4 @@
 import { execFile } from "node:child_process";
-import { fileURLToPath } from "node:url";
-
-export const ASKPASS = fileURLToPath(new URL("./askpass.sh", import.meta.url));
 
 export type GitResult = { ok: true; output: string } | { ok: false; code: number; output: string };
 
@@ -19,25 +16,25 @@ function run(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }): P
   });
 }
 
-// null token (public/local repo) => no askpass env, behaves like plain clone.
-function askpassEnv(token: string | null): NodeJS.ProcessEnv {
-  if (!token) return { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  return {
-    ...process.env,
-    GIT_ASKPASS: ASKPASS,
-    GIT_ASKPASS_USERNAME: "x-access-token",
-    GIT_ASKPASS_TOKEN: token,
-    GIT_TERMINAL_PROMPT: "0",
-  };
-}
+/**
+ * `GIT_TERMINAL_PROMPT=0` turns a missing credential into an immediate error
+ * instead of a hang on a TTY that is not there.
+ */
+const noPrompt = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_TERMINAL_PROMPT: "0" });
 
-/** Full clone (no --depth) so any branch/tag/SHA can be checked out afterward. */
-export function clone(url: string, dest: string, token: string | null): Promise<GitResult> {
-  return run(["clone", url, dest], { env: askpassEnv(token) });
+/**
+ * Full clone (no --depth) so any branch/tag/SHA can be checked out afterward.
+ *
+ * No token parameter: authentication is git's system credential helper
+ * (`throng-creds`, configured in the image), which mints a token scoped to this
+ * repo at the moment of the fetch.
+ */
+export function clone(url: string, dest: string): Promise<GitResult> {
+  return run(["clone", url, dest], { env: noPrompt() });
 }
 
 export function checkout(dest: string, ref: string): Promise<GitResult> {
-  return run(["checkout", ref], { cwd: dest, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+  return run(["checkout", ref], { cwd: dest, env: noPrompt() });
 }
 
 export function revParseHead(dest: string): Promise<GitResult> {

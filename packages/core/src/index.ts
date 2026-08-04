@@ -13,8 +13,8 @@ export type {
 } from "./manifest/types.js";
 export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export type { Env } from "./env.js";
-export { clone, checkout, type GitResult, ASKPASS } from "./bootstrap/git.js";
+export { clone, checkout, type GitResult } from "./bootstrap/git.js";
 export { runSetupCommands, describeSetupFailure, type SetupResult } from "./bootstrap/setup.js";
-export { injectGitCredentials, injectGitIdentity } from "./bootstrap/git-credentials.js";
+export { injectGitIdentity } from "./bootstrap/git-identity.js";
 export { checkInitToken } from "./control/init-token.js";
 export { log } from "./log.js";
