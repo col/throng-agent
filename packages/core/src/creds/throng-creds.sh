@@ -19,7 +19,11 @@ set -uo pipefail
 CONFIG_FILE="${THRONG_CONFIG:-/run/throng/config.json}"
 CACHE_DIR="${THRONG_CREDS_CACHE:-/run/throng/cache}"
 SKEW=300              # serve_until = expires_at - SKEW
-STATIC_TTL=315360000  # 10 years, for a literal github_token
+# 10 years, for a literal github_token. Never expiring is safe because
+# /run/throng/config.json is written once when the sandbox is created and never
+# again: a changed static token cannot appear in a running sandbox, so a cache
+# entry minted from it can never go stale relative to its source.
+STATIC_TTL=315360000
 
 warn() { printf 'throng-creds: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
@@ -64,9 +68,85 @@ write_cache() { # $1=key $2=serve_until $3=username $4=token $5=password_expiry
     printf 'username=%s\n' "$3"
     printf 'password=%s\n' "$4"
     printf 'password_expiry_utc=%s\n' "$5"
-  } > "$tmp" || return 1
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 600 "$tmp" 2>/dev/null
   mv -f "$tmp" "$file"
+}
+
+# REPLY <- a request id. /proc is Linux-only and the test suite runs on macOS.
+uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    read -r REPLY < /proc/sys/kernel/random/uuid
+  elif command -v uuidgen >/dev/null 2>&1; then
+    REPLY=$(uuidgen)
+  else
+    REPLY="$$-$(now)-$RANDOM"
+  fi
+}
+
+# GNU date and BSD date disagree on parsing; try both. The API contract
+# specifies ISO-8601 with a Z suffix, which is all we accept.
+iso_to_epoch() {
+  date -u -d "$1" +%s 2>/dev/null && return 0
+  date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null && return 0
+  return 1
+}
+
+fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
+  local req resp rc status body msg username tok exp_iso exp_epoch serve_until scope
+
+  req=$(jq -nc --arg p "$2" --arg h "$3" --arg r "$4" \
+        '{purpose:$p, host:$h} + (if $r == "" then {} else {repo:$r} end)')
+
+  uuid
+  # --retry covers 5xx, timeouts and connection-refused. A 4xx is never retried,
+  # which is what we want: a 403 will not become a 200.
+  resp=$(curl -sS --max-time 10 --retry 2 --retry-connrefused \
+           -w '\n%{http_code}' \
+           -H "Authorization: Bearer $6" \
+           -H "Content-Type: application/json" \
+           -H "Idempotency-Key: $REPLY" \
+           -d "$req" "$5/v1/credentials/github" 2>/dev/null)
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
+    die "the Throng credential service is unreachable. This is transient — retry the same command."
+  fi
+
+  # -w always appends "\n<code>", so the status is everything after the final
+  # newline and the body is everything before it. Correct even when the body is
+  # empty or carries no trailing newline of its own.
+  status="${resp##*
+}"
+  body="${resp%
+*}"
+
+  # Not `${4:-the task's default scope}`: bash honours a single quote inside
+  # ${...} even within double quotes, so the apostrophe would open a string
+  # that never closes and the whole script would fail to parse.
+  scope="$4"
+  [ -n "$scope" ] || scope="the task's default scope"
+  case "$status" in
+    200) ;;
+    401) die "task identity rejected — this task may have been revoked or completed." ;;
+    403)
+      msg=$(printf '%s' "$body" | jq -r '.message // empty' 2>/dev/null)
+      die "this task's credentials do not cover $scope. This is a policy decision and will not change on retry: do not retry it, and do not attempt the same operation against a different repository or remote.${msg:+ ($msg)}"
+      ;;
+    429) die "the Throng credential service is rate limiting. This is transient — retry the same command." ;;
+    *)   die "the Throng credential service returned HTTP $status. This is transient — retry the same command." ;;
+  esac
+
+  username=$(printf '%s' "$body" | jq -r '.username // empty' 2>/dev/null)
+  tok=$(printf '%s' "$body" | jq -r '.token // empty' 2>/dev/null)
+  exp_iso=$(printf '%s' "$body" | jq -r '.expires_at // empty' 2>/dev/null)
+  [ -n "$tok" ] || die "the credential service returned no token."
+  # Without expires_at the entry could never age out, and the installation-token
+  # creation limit would be exhausted by the resulting churn elsewhere.
+  [ -n "$exp_iso" ] || die "the credential service returned no expires_at."
+
+  exp_epoch=$(iso_to_epoch "$exp_iso") || die "could not parse expires_at '$exp_iso'."
+  serve_until=$(( exp_epoch - SKEW ))
+  write_cache "$1" "$serve_until" "${username:-x-access-token}" "$tok" "$exp_epoch"
 }
 
 # Fills the cache for a key. Returns 1 to DECLINE — no config, or nothing
@@ -85,7 +165,12 @@ resolve() { # $1=key $2=purpose $3=host $4=repo (may be empty)
     return 0
   fi
 
-  return 1
+  local url token
+  url=$(jq -r '.credentials.url // empty' "$CONFIG_FILE" 2>/dev/null)
+  token=$(jq -r '.credentials.token // empty' "$CONFIG_FILE" 2>/dev/null)
+  [ -n "$url" ] && [ -n "$token" ] || return 1
+
+  fetch "$1" "$2" "$3" "$4" "$url" "$token"
 }
 
 # Prints the credential block for a key, from cache when fresh.

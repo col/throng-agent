@@ -8,10 +8,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./throng-creds.sh", import.meta.url));
 
@@ -314,5 +315,198 @@ describe("throng-creds config resolution", () => {
     const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
 
     expect(r.stdout).toContain("password=ghp_static");
+  });
+});
+
+interface Stub {
+  url: string;
+  requests: Array<{ body: string; auth: string | undefined; idempotency: string | undefined }>;
+  close: () => Promise<void>;
+}
+
+/** A stand-in for POST /v1/credentials/github. `reply` decides each response. */
+async function stubApi(
+  reply: (n: number) => { status: number; body: unknown },
+): Promise<Stub> {
+  const requests: Stub["requests"] = [];
+  const server: Server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      requests.push({
+        body,
+        auth: req.headers.authorization,
+        idempotency: req.headers["idempotency-key"] as string | undefined,
+      });
+      const { status, body: payload } = reply(requests.length);
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(payload));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  };
+}
+
+const stubs: Stub[] = [];
+afterEach(async () => {
+  while (stubs.length) await stubs.pop()!.close();
+});
+
+async function api(reply: (n: number) => { status: number; body: unknown }): Promise<Stub> {
+  const s = await stubApi(reply);
+  stubs.push(s);
+  return s;
+}
+
+const okBody = (token: string, expiresAt: string) => ({
+  username: "x-access-token",
+  token,
+  expires_at: expiresAt,
+  scope: { repos: ["acme/app"], permissions: { contents: "write" } },
+});
+
+const isoIn = (seconds: number) =>
+  new Date(Date.now() + seconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+describe("throng-creds credentials API", () => {
+  it("mints a token, sends the task identity, and caches the result", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_minted", isoIn(3600)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("password=ghs_minted");
+    expect(stub.requests).toHaveLength(1);
+    expect(stub.requests[0].auth).toBe("Bearer task-tok");
+    expect(stub.requests[0].idempotency).toBeTruthy();
+    expect(JSON.parse(stub.requests[0].body)).toEqual({
+      purpose: "git",
+      host: "github.com",
+      repo: "acme/app",
+    });
+  });
+
+  it("omits repo entirely for gh, so the server applies the default scope", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_api", isoIn(3600)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    await run(dir, ["gh"]);
+
+    expect(JSON.parse(stub.requests[0].body)).toEqual({ purpose: "api", host: "github.com" });
+  });
+
+  // serve_until is expires_at minus skew, so the fast path needs no ISO parsing
+  // and no arithmetic of its own.
+  it("writes serve_until 300s before the true expiry", async () => {
+    const dir = sandbox();
+    const expiresAt = isoIn(3600);
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_x", expiresAt) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    const lines = readFileSync(join(dir, "cache", "git_github.com_acme_app"), "utf8").split("\n");
+    const trueExpiry = Math.floor(new Date(expiresAt).getTime() / 1000);
+    expect(Number(lines[0])).toBe(trueExpiry - 300);
+    expect(lines[1]).toBe("git|github.com|acme/app");
+    expect(lines).toContain(`password_expiry_utc=${trueExpiry}`);
+  });
+
+  it("does not call the API twice for the same key", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_once", isoIn(3600)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+    const second = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(second.stdout).toContain("password=ghs_once");
+    expect(stub.requests).toHaveLength(1);
+  });
+
+  it("403 is permanent, names the repo, and tells the agent not to work around it", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({
+      status: 403,
+      body: { message: "acme/secret is not in this task's grant" },
+    }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/secret.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("acme/secret");
+    expect(r.stderr).toContain("will not change on retry");
+    expect(r.stderr).toContain("different repository or remote");
+    expect(r.stderr).toContain("is not in this task's grant");
+    expect(stub.requests).toHaveLength(1); // never retried
+  });
+
+  it("401 reports a revoked or completed task", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 401, body: {} }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("revoked or completed");
+    expect(stub.requests).toHaveLength(1);
+  });
+
+  it("429 is described as transient and retryable", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 429, body: {} }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("transient");
+    expect(r.stderr).toContain("retry the same command");
+  });
+
+  it("retries a 5xx and succeeds when the retry does", async () => {
+    const dir = sandbox();
+    const stub = await api((n) =>
+      n === 1
+        ? { status: 503, body: {} }
+        : { status: 200, body: okBody("ghs_afterretry", isoIn(3600)) },
+    );
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.stdout).toContain("password=ghs_afterretry");
+    expect(stub.requests.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports an unreachable service as transient", async () => {
+    const dir = sandbox();
+    writeConfig(dir, { credentials: { url: "http://127.0.0.1:1", token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("transient");
+  });
+
+  it("rejects a 200 that omits expires_at rather than caching forever", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: { username: "x", token: "ghs_x" } }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("expires_at");
   });
 });
