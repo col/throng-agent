@@ -131,3 +131,66 @@ describe("throng-creds fast path", () => {
     expect(r.stdout).not.toContain("password=");
   });
 });
+
+describe("throng-creds decline rules", () => {
+  it("declines a non-HTTPS protocol so git falls through", async () => {
+    const dir = sandbox();
+    seedCache(dir, "git|github.com|acme/app", { serveUntil: soon(), token: "ghs_x" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: "protocol=ssh\nhost=github.com\npath=acme/app.git\n\n",
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("declines a host other than github.com", async () => {
+    const dir = sandbox();
+    seedCache(dir, "git|gitlab.com|acme/app", { serveUntil: soon(), token: "ghs_x" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: "protocol=https\nhost=gitlab.com\npath=acme/app.git\n\n",
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("derives the same repo with or without a trailing .git", async () => {
+    const dir = sandbox();
+    seedCache(dir, "git|github.com|acme/app", { serveUntil: soon(), token: "ghs_same" });
+
+    const withSuffix = await run(dir, ["git", "get"], {
+      stdin: "protocol=https\nhost=github.com\npath=acme/app.git\n\n",
+    });
+    const without = await run(dir, ["git", "get"], {
+      stdin: "protocol=https\nhost=github.com\npath=acme/app\n\n",
+    });
+
+    expect(withSuffix.stdout).toContain("password=ghs_same");
+    expect(without.stdout).toContain("password=ghs_same");
+  });
+
+  it("strips a leading slash from path", async () => {
+    const dir = sandbox();
+    seedCache(dir, "git|github.com|acme/app", { serveUntil: soon(), token: "ghs_slash" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: "protocol=https\nhost=github.com\npath=/acme/app.git\n\n",
+    });
+
+    expect(r.stdout).toContain("password=ghs_slash");
+  });
+
+  it("falls back to the default scope when useHttpPath is off (no path sent)", async () => {
+    const dir = sandbox();
+    seedCache(dir, "git|github.com|", { serveUntil: soon(), token: "ghs_default" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: "protocol=https\nhost=github.com\n\n",
+    });
+
+    expect(r.stdout).toContain("password=ghs_default");
+  });
+});
