@@ -18,5 +18,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
       - run: npm run build
+      # The Dockerfile installs /usr/local/bin/throng-creds and /usr/local/bin/gh
+      # from packages/core/dist/creds. Nothing but the `cp && chmod` tail of
+      # core's build script puts them there, and tsc ignores .sh files entirely —
+      # so losing that line breaks the image while leaving build, typecheck and
+      # test green. This is the only place that notices, and it costs nothing.
+      - name: Verify the creds scripts shipped in dist
+        run: |
+          for f in packages/core/dist/creds/throng-creds.sh packages/core/dist/creds/gh-shim.sh; do
+            [ -f "$f" ] || { echo "::error::$f is missing from the build output"; exit 1; }
+            [ -x "$f" ] || { echo "::error::$f is not executable"; exit 1; }
+          done
       - run: npm run typecheck
       - run: npm test
