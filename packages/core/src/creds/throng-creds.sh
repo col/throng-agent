@@ -85,14 +85,39 @@ git_get() {
   printf 'quit=1\n'
 }
 
+git_erase() {
+  cat >/dev/null
+  # Git calls erase after a 401. Drop the whole directory rather than globbing:
+  # lock directories live here too, and a partial clear would leave a rejected
+  # token in play for some other key.
+  rm -rf "${CACHE_DIR:?}"
+  return 0
+}
+
+# The shim cannot know which repo a given `gh` command targets, so `gh` always
+# resolves against the task's default scope.
+gh_token() {
+  local out line
+  out=$(credential "api|github.com|" api "github.com" "") || exit 0
+  while IFS= read -r line; do
+    case "$line" in
+      password=*) printf '%s\n' "${line#password=}"; return 0 ;;
+    esac
+  done <<EOF
+$out
+EOF
+  return 0
+}
+
 case "${1:-}" in
   git)
     case "${2:-}" in
       get)   git_get ;;
-      store) cat >/dev/null ;;
-      erase) cat >/dev/null ;;
+      store) cat >/dev/null ;;   # nothing to persist; must still exit 0
+      erase) git_erase ;;
       *)     exit 0 ;;
     esac
     ;;
-  *) die "usage: throng-creds git <get|store|erase> | throng-creds gh" ;;
+  gh) gh_token ;;
+  *)  die "usage: throng-creds git <get|store|erase> | throng-creds gh" ;;
 esac

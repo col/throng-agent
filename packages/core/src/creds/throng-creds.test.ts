@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,5 +192,53 @@ describe("throng-creds decline rules", () => {
     });
 
     expect(r.stdout).toContain("password=ghs_default");
+  });
+});
+
+describe("throng-creds store/erase/gh", () => {
+  it("store consumes stdin and exits 0 without persisting anything", async () => {
+    const dir = sandbox();
+
+    const r = await run(dir, ["git", "store"], {
+      stdin: "protocol=https\nhost=github.com\nusername=x\npassword=y\n\n",
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(existsSync(join(dir, "cache"))).toBe(false);
+  });
+
+  // Git calls erase after a 401. Everything must go, so the next operation
+  // re-mints rather than replaying a token GitHub has already rejected.
+  it("erase clears the cache", async () => {
+    const dir = sandbox();
+    seedCache(dir, "git|github.com|acme/app", { serveUntil: soon(), token: "ghs_dead" });
+    seedCache(dir, "api|github.com|", { serveUntil: soon(), token: "ghs_dead2" });
+
+    const r = await run(dir, ["git", "erase"], {
+      stdin: "protocol=https\nhost=github.com\n\n",
+    });
+
+    expect(r.code).toBe(0);
+    expect(existsSync(join(dir, "cache")) ? readdirSync(join(dir, "cache")) : []).toEqual([]);
+  });
+
+  it("gh prints a bare token from the default-scope entry", async () => {
+    const dir = sandbox();
+    seedCache(dir, "api|github.com|", { serveUntil: soon(), token: "ghs_forgh" });
+
+    const r = await run(dir, ["gh"]);
+
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe("ghs_forgh");
+  });
+
+  it("gh prints nothing and exits 0 when unconfigured", async () => {
+    const dir = sandbox();
+
+    const r = await run(dir, ["gh"]);
+
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe("");
   });
 });
