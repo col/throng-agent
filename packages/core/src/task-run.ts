@@ -74,7 +74,11 @@ export class TaskRun {
       let primaryDest = "";
       for (const repo of manifest.repos) {
         const dest = join(this.deps.workspaceRoot, repo.dest);
-        log.info("cloning repo", { url: repo.url, ref: repo.ref, dest, primary: repo.primary });
+        // `repos[].url` is whatever the caller sent, and the credential-in-URL
+        // form (https://x-access-token:ghs_…@github.com/…) is still legal input
+        // even though nothing in this runtime produces it any more. stdout leaves
+        // the box, so it gets the same redaction as the failure messages below.
+        log.info("cloning repo", { url: redactTokens(repo.url), ref: repo.ref, dest, primary: repo.primary });
         // Clone and checkout run WITH credentials in place, and this message
         // becomes the control plane's `instance.error_message` — the same sink
         // describeSetupFailure redacts. git does not normally echo a

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { describeSetupFailure, redactTokens, runSetupCommands } from "./setup.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "a2a-setup-"));
@@ -148,5 +148,40 @@ describe("token redaction", () => {
     expect(message).not.toContain(token);
     expect(message).not.toContain("KLMNOPQRST"); // nor the surviving tail of it
     expect(message).toContain("[REDACTED]");
+  });
+
+  // The COMMAND is as token-bearing as the output. `setup_commands` is caller
+  // supplied, and a `git clone https://ghp_…@github.com/...` in it lands in the
+  // same instance.error_message the output half is already redacted for.
+  it("redacts a token in the failing command, not just in its output", () => {
+    const message = describeSetupFailure({
+      ok: false,
+      command: "git clone https://ghp_0123456789abcdefghij@github.com/acme/app",
+      code: 128,
+      signal: null,
+      output: "fatal: repository not found\n",
+    });
+
+    expect(message).not.toContain("ghp_0123456789abcdefghij");
+    expect(message).toContain("[REDACTED]");
+    expect(message).toContain("github.com/acme/app"); // still identifies the command
+  });
+});
+
+describe("runSetupCommands logging", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("redacts a token in the command on both the start and failure log lines", async () => {
+    const lines: string[] = [];
+    const capture = (line: unknown) => void lines.push(String(line));
+    vi.spyOn(console, "log").mockImplementation(capture);
+    vi.spyOn(console, "error").mockImplementation(capture);
+    const dir = tmp();
+
+    await runSetupCommands(dir, ["echo ghp_0123456789abcdefghij && exit 3"]);
+
+    expect(lines.some((l) => l.includes("setup command starting"))).toBe(true);
+    expect(lines.some((l) => l.includes("setup command failed"))).toBe(true);
+    for (const line of lines) expect(line).not.toContain("ghp_0123456789abcdefghij");
   });
 });

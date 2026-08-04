@@ -87,14 +87,20 @@ export function describeSetupFailure(result: Extract<SetupResult, { ok: false }>
   // no longer matches and the token's suffix is kept verbatim.
   const body = tail(redactTokens(result.output));
   const outputBlock = body ? `\n--- output (tail) ---\n${body}` : "\n(no output)";
-  return `setup command failed: ${result.command} (${how})${outputBlock}`;
+  // The command is caller-supplied and as token-bearing as the output: a
+  // `git clone https://ghp_…@github.com/…` in `setup_commands` lands in the same
+  // `instance.error_message`.
+  return `setup command failed: ${redactTokens(result.command)} (${how})${outputBlock}`;
 }
 
 /** Runs commands sequentially in `cwd`; the first non-zero exit fails the run. */
 export async function runSetupCommands(cwd: string, commands: string[]): Promise<SetupResult> {
   for (const [index, command] of commands.entries()) {
     const step = `${index + 1}/${commands.length}`;
-    log.info("setup command starting", { step, command, cwd });
+    // Logged redacted, returned verbatim: `command` is passed to the shell from
+    // the manifest, so it may carry a token, but the caller needs the real string.
+    const safeCommand = redactTokens(command);
+    log.info("setup command starting", { step, command: safeCommand, cwd });
     const startedAt = Date.now();
     const { code, signal, output } = await runOne(cwd, command);
     const durationMs = Date.now() - startedAt;
@@ -102,11 +108,11 @@ export async function runSetupCommands(cwd: string, commands: string[]): Promise
     if (code !== 0) {
       // Full output at ERROR — the message carries only the tail, and a truncated
       // compile log is exactly what makes these failures hard to diagnose.
-      log.error("setup command failed", { step, command, code, signal, durationMs, output: redactTokens(output) });
+      log.error("setup command failed", { step, command: safeCommand, code, signal, durationMs, output: redactTokens(output) });
       return { ok: false, command, code, signal, output };
     }
 
-    log.info("setup command finished", { step, command, durationMs });
+    log.info("setup command finished", { step, command: safeCommand, durationMs });
   }
   return { ok: true };
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { TaskRun, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
 
@@ -170,5 +170,32 @@ describe("TaskRun credential ordering", () => {
     await settle();
 
     expect(d.clone).toHaveBeenCalledWith("https://x/y", "/workspace/y");
+  });
+});
+
+describe("TaskRun logging", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // The pull model does not stop a caller sending a credential-bearing clone
+  // URL — `repos[].url` is whatever the control plane put there, and
+  // `https://x-access-token:ghs_…@github.com/…` is a shape this repo's own
+  // fixtures use. stdout is shipped off the box, so it is the same sink the
+  // failure messages are already redacted for.
+  it("redacts a token embedded in the clone URL before logging it", async () => {
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => void logged.push(String(line)));
+    const url = "https://x-access-token:ghs_0123456789abcdefghij@github.com/acme/app.git";
+
+    const tr = new TaskRun(deps(), { claude: adapter() });
+    await tr.initialise({ ...okPayload, repos: [{ url, ref: "main", dest: "app", primary: true }] });
+    await settle();
+
+    // The trailing space keeps "boot step: cloning repos" out of the match.
+    const cloning = logged.filter((l) => l.includes("cloning repo "));
+    expect(cloning).toHaveLength(1);
+    expect(cloning[0]).not.toContain("ghs_0123456789abcdefghij");
+    expect(cloning[0]).toContain("[REDACTED]");
+    // Still useful to an operator: the host and repo survive redaction.
+    expect(cloning[0]).toContain("github.com/acme/app.git");
   });
 });
