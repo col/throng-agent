@@ -96,13 +96,31 @@ or neither.
 request to the repo git is talking to, which a static per-repo token cannot.
 
 Whichever mode is in play, `/api/initialise` writes what the helper needs to
-`/dev/shm/throng/config.json` (mode `0600`, in a `0700` directory) and the
-credential cache lives in `/dev/shm/throng/cache`. `/dev/shm` is tmpfs, so no
-credential reaches a persisted filesystem, and it is writable without privilege —
-which matters because the same image runs as root under `docker run` but as
-`uid 1000` under E2B, where `/run` (the original location) is root-owned and
-unwritable. Both paths can be overridden with `THRONG_CONFIG` and
-`THRONG_CREDS_CACHE`.
+`$HOME/.throng/config.json` (mode `0600`, in a `0700` directory) and the
+credential cache lives in `$HOME/.throng/cache`. Repos are cloned into
+`$HOME/workspace`.
+
+`$HOME` because the sandbox runs unprivileged: the same image runs as root under
+`docker run` but as `uid 1000` under E2B, where `/run` (the original location) is
+root-owned and unwritable, `/workspace` cannot be created at all, and `/dev/shm`
+(the intermediate one) is world-writable. `$HOME` needs no privilege and its
+parent is owned by the user, so nothing can squat the directory. The trade is
+that it is disk-backed, so the identity token does land on a persisted layer —
+accepted, because E2B snapshots memory on pause anyway and the design already
+assumes the agent can read that token.
+
+`HOME` itself must be set, and both the runtime and the bash helper read that
+variable and nothing else — deliberately, since Node's `os.homedir()` falls back
+to the passwd entry and bash's `$HOME` does not, and a disagreement would leave
+the runtime writing a file the helper never looks at. An unset `HOME` is a hard
+error rather than a fallback.
+
+All three paths can be overridden: `THRONG_CONFIG`, `THRONG_CREDS_CACHE` and
+`WORKSPACE_DIR`. Note that under E2B these are overrides only, not a delivery
+mechanism — the runtime process there is captured in the template snapshot and is
+resumed with a scrubbed environment that carries neither the image's `ENV` nor
+the template's `setEnvs`. Anything the runtime must have comes from a code
+default, from `/api/initialise`, or from a file.
 
 ### Running standalone
 
@@ -119,14 +137,33 @@ curl -X POST localhost:8080/api/initialise -H 'content-type: application/json' -
 Then confirm the credential wiring end to end:
 
 ```bash
-docker exec throng-agent bash -lc 'cd /workspace/app && git fetch && gh auth status'
+docker exec throng-agent bash -lc 'cd ~/workspace/app && git fetch && gh auth status'
 ```
 
-Note that plain `docker run` starts the container as root, because the image sets
-no `USER`. E2B does not honour `USER` and runs the sandbox as `uid 1000`, so a
-standalone run is **not** a faithful reproduction of production for anything that
-writes outside `/workspace`. Add `--user 1000:1000` to reproduce that half — it is
-what a credential-path bug hid behind once already.
+Plain `docker run` is **not** a faithful reproduction of production, in two ways
+that have each hidden a bug already:
+
+- It starts the container as **root**, because the image sets no `USER`. E2B does
+  not honour `USER` and runs the sandbox as `uid 1000`. Add `--user 1000:1000`.
+- It **inherits the image's `ENV`**. The E2B runtime inherits none of it, so a
+  variable set only in the Dockerfile is present under `docker run` and absent in
+  production. Strip them with a bare `-e NAME` (no `=`) for each of the three the
+  image sets — `CONTROL_PORT`, `GIT_TERMINAL_PROMPT`, `LANG` — with the same name
+  unset on the host, which makes Docker drop it entirely. `--env-file /dev/null`
+  does *not* do this: it suppresses nothing the image itself sets.
+
+Both together, which is what production actually looks like:
+
+```bash
+docker run -d -p 8080:8080 -p 3030:3030 --name throng-agent \
+  --user 1000:1000 -e HOME=/home/node -e USER=node \
+  -e PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  -e CONTROL_PORT -e GIT_TERMINAL_PROMPT -e LANG \
+  ghcr.io/col/throng-agent:latest
+```
+
+(`node:20-slim` already has a `node` user at uid 1000 with `/home/node`, which
+stands in for E2B's `user`/`/home/user`.)
 
 ## What's in the box?
 

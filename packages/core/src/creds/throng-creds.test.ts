@@ -7,14 +7,15 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./throng-creds.sh", import.meta.url));
 const SHIM = fileURLToPath(new URL("./gh-shim.sh", import.meta.url));
@@ -600,9 +601,11 @@ describe("throng-creds cache directory guard", () => {
     ["a relative path", "cache"],
     ["a path escaping via ..", "/dev/shm/throng/../../../etc"],
     ["a path with a . segment", "/dev/./cache"],
-    // Two segments, so the depth rule lets it through — but it is the tmpfs the
-    // whole sandbox shares AND the parent of the default cache path, which makes
-    // it the mis-set "/run" used to be before the default moved under it.
+    // Two segments, so the depth rule lets it through. No longer the parent of
+    // the default cache path — that moved to $HOME — but still the one
+    // world-writable mount the whole sandbox shares, and still the default one
+    // release ago, so a stale override is a real thing rather than a
+    // hypothetical one.
     ["the shared tmpfs mount itself", "/dev/shm"],
     ["the shared tmpfs mount with a trailing slash", "/dev/shm/"],
   ];
@@ -621,6 +624,104 @@ describe("throng-creds cache directory guard", () => {
     expect(r.stderr).toContain(value);
     expect(r.stderr).toMatch(/THRONG_CREDS_CACHE|cache directory/);
     expect(r.stdout).toBe("");
+  });
+
+  // $HOME is the mis-set that "/run" and then "/dev/shm" used to be, and it is
+  // the worst of the three: it now holds the credential config, the cache AND
+  // the workspace the task's repos were cloned into, so `git credential erase`
+  // there destroys the entire task. The depth rule cannot see it — /home/user's
+  // parent is /home, not "/" — so it is named explicitly, and this pins that.
+  //
+  // The value is a temp directory rather than the real home, because a
+  // regression that drops the guard must not run `rm -rf` over the developer's
+  // home directory to prove it.
+  it.each([
+    ["exactly", (home: string) => home],
+    ["with a trailing slash", (home: string) => `${home}/`],
+  ])("refuses $HOME %s on git get", async (_label, value) => {
+    const home = sandbox();
+    mkdirSync(join(home, ".throng"), { recursive: true });
+    writeFileSync(join(home, ".throng", "config.json"), JSON.stringify({ github_token: "ghp_x" }));
+
+    const r = await run(home, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { HOME: home, THRONG_CONFIG: "", THRONG_CREDS_CACHE: value(home) },
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("$HOME");
+    expect(r.stdout).toBe("");
+  });
+
+  // Sharper version of the same argument. Everything else erase destroys is
+  // re-mintable on the next operation; config.json is not. It is written once at
+  // initialise and there is no rotation path into a running sandbox, so losing
+  // it does not cost a round trip — it takes away the only identity the sandbox
+  // will ever have. Checked against the resolved config path, so it holds for a
+  // THRONG_CONFIG that points somewhere else entirely.
+  //
+  // Every refusal here is a string compare between two operator-supplied values,
+  // so each spelling of the same directory has to be tried: the doubled-slash
+  // case slipped through before `normalise_path` was applied to both sides, and
+  // a doubled slash in a hand-set THRONG_CONFIG is exactly the population the
+  // guard exists for.
+  it.each([
+    ["canonical", (d: string) => join(d, "config.json"), (d: string) => d],
+    ["a doubled slash in THRONG_CONFIG", (d: string) => `${d}//config.json`, (d: string) => d],
+    ["a trailing slash on the cache value", (d: string) => join(d, "config.json"), (d: string) => `${d}/`],
+  ])("refuses the directory holding config.json (%s)", async (_label, config, cache) => {
+    const dir = sandbox();
+    const configDir = join(dir, "elsewhere");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "config.json"), JSON.stringify({ github_token: "ghp_x" }));
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CONFIG: config(configDir), THRONG_CREDS_CACHE: cache(configDir) },
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("write-once credential config");
+    expect(r.stdout).toBe("");
+  });
+
+  // The workspace is what the $HOME rule above is really protecting, and it
+  // sits one segment below $HOME — so refusing $HOME without refusing this
+  // would leave the stated rationale untrue. Both the default location and an
+  // explicit WORKSPACE_DIR, since the two must track defaultBootDeps().
+  it.each([
+    ["the default $HOME/workspace", (home: string) => ({ HOME: home, THRONG_CREDS_CACHE: join(home, "workspace") })],
+    ["an explicit WORKSPACE_DIR", (home: string) => ({ HOME: home, WORKSPACE_DIR: "/mnt/work", THRONG_CREDS_CACHE: "/mnt/work" })],
+  ])("refuses the workspace itself (%s)", async (_label, envFor) => {
+    const home = sandbox();
+    mkdirSync(join(home, ".throng"), { recursive: true });
+    writeFileSync(join(home, ".throng", "config.json"), JSON.stringify({ github_token: "ghp_x" }));
+
+    const r = await run(home, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CONFIG: "", ...envFor(home) },
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("workspace");
+    expect(r.stdout).toBe("");
+  });
+
+  // Defence in depth: the cache holds 0600 token files, but only the config
+  // directory's 0700 keeps the directory itself private, and that stops being
+  // true the moment THRONG_CREDS_CACHE points outside it — which the guard above
+  // actively pushes operators toward.
+  it("creates the cache directory 0700 rather than at the ambient umask", async () => {
+    const dir = sandbox();
+    const cache = join(dir, "deep", "cache");
+    writeConfig(dir, { github_token: "ghp_modecheck" });
+
+    await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CREDS_CACHE: cache },
+    });
+
+    expect(statSync(cache).mode & 0o777).toBe(0o700);
   });
 
   // erase is the mode that actually deletes, so it gets its own case. The value
@@ -685,42 +786,118 @@ describe("throng-creds cache directory guard", () => {
 // so nothing above here would notice if the built-in defaults were wrong — and
 // wrong is what they were: /run is tmpfs owned root:root 0755, and E2B runs the
 // sandbox as uid 1000, so the first real boot died on `mkdir /run/throng`.
+//
+// Both defaults are `$HOME`-relative now, so they can be exercised for real
+// rather than pinned as source strings: point HOME at a temp directory and let
+// the script resolve them.
 describe("throng-creds default locations", () => {
-  const source = readFileSync(SCRIPT, "utf8");
+  const originalHome = process.env.HOME;
 
-  // Pinned as source rather than behaviour because the paths are absolute and a
-  // test must not write to them. The matching assertion for the TypeScript side
-  // is in config.test.ts; the two must not drift, since the runtime writes the
-  // file this script reads.
-  it("defaults the config file and the cache to /dev/shm/throng", () => {
-    expect(source).toContain('CONFIG_FILE="${THRONG_CONFIG:-/dev/shm/throng/config.json}"');
-    expect(source).toContain('CACHE_DIR="${THRONG_CREDS_CACHE:-/dev/shm/throng/cache}"');
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    vi.resetModules();
   });
 
-  // The guard and the default have to agree, and they nearly did not: the depth
-  // rule refuses a two-segment path, and /dev/shm is two segments. It is the
-  // cache directory — one level deeper — that the default names.
-  //
-  // This deliberately does not clean up after itself. On Linux the run creates
-  // /dev/shm/throng/cache, which is exactly what the runtime creates anyway; an
-  // rm here would delete a live sandbox's cache and config if the suite were
-  // ever run inside one. On macOS there is no /dev/shm and the mkdir simply
-  // fails, which the script already tolerates.
-  it("does not refuse its own default cache directory", async () => {
-    const dir = sandbox();
+  // Empty rather than deleted, because run() spreads process.env and bash reads
+  // both overrides with `${VAR:-…}` — for which empty and unset are the same
+  // thing. That equivalence is itself part of the contract with config.ts.
+  const useDefaults = (home: string) => ({ HOME: home, THRONG_CONFIG: "", THRONG_CREDS_CACHE: "" });
 
-    const r = await run(dir, ["git", "get"], {
+  // THE test for this change. The runtime writes the config file and this script
+  // reads it, and they now compute the path independently, in two languages,
+  // from an environment variable that Node's os.homedir() would happily
+  // substitute for and bash would not. If they ever disagree the helper finds no
+  // config and declines — silently, by design — and every clone in a correctly
+  // initialised sandbox falls back to unauthenticated. So: resolve the path the
+  // way the runtime does, write a token there, and make the script find it
+  // without being told where to look.
+  it("reads the very file creds/config.ts writes, with both defaults left alone", async () => {
+    const home = sandbox();
+    process.env.HOME = home;
+    vi.resetModules();
+    const { CONFIG_PATH } = await import("./config.js");
+    expect(CONFIG_PATH).toBe(join(home, ".throng", "config.json"));
+
+    mkdirSync(dirname(CONFIG_PATH), { recursive: true, mode: 0o700 });
+    writeFileSync(CONFIG_PATH, JSON.stringify({ github_token: "ghp_agreed" }), { mode: 0o600 });
+
+    const r = await run(home, ["git", "get"], {
       stdin: getStdin("acme/app.git"),
-      env: {
-        THRONG_CREDS_CACHE: "/dev/shm/throng/cache",
-        THRONG_CONFIG: join(dir, "absent.json"),
-      },
+      env: useDefaults(home),
+    });
+
+    expect(r.stderr).toBe("");
+    expect(r.stdout).toContain("password=ghp_agreed");
+    // And the cache lands beside it rather than somewhere else again.
+    expect(existsSync(join(home, ".throng", "cache"))).toBe(true);
+  });
+
+  // The guard and the default have to agree, and they nearly did not once
+  // before: the depth rule refuses a two-segment path, and /dev/shm was two
+  // segments. $HOME is now refused outright, and the cache default is two levels
+  // below it, so the arrangement has to be re-checked rather than assumed.
+  it("does not refuse its own default cache directory", async () => {
+    const home = sandbox();
+
+    const r = await run(home, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: useDefaults(home),
     });
 
     // Declines because there is no config, not because the path was refused.
     expect(r.stderr).toBe("");
     expect(r.code).toBe(0);
     expect(r.stdout).toBe("");
+  });
+
+  // No HOME and no override means there is no `~` to expand. Falling back would
+  // produce "/.throng", which is root-owned and uncreatable as uid 1000 — the
+  // very failure the path move exists to fix — so this dies where it can be
+  // read, rather than declining silently like an unconfigured sandbox.
+  it.each([
+    ["git get", ["git", "get"]],
+    ["git erase", ["git", "erase"]],
+    ["gh", ["gh"]],
+  ])("dies loudly on %s when HOME is unset and neither path is overridden", async (_label, args) => {
+    const home = sandbox();
+
+    const r = await run(home, args, {
+      stdin: getStdin("acme/app.git"),
+      env: { HOME: "", THRONG_CONFIG: "", THRONG_CREDS_CACHE: "" },
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("HOME is unset");
+    expect(r.stdout).toBe("");
+  });
+
+  // `git store` is the exception, and deliberately so: git's protocol gives it
+  // no way to report a failure, it reads and writes neither path, and it is the
+  // Dockerfile's build-time smoke check. Resolving the defaults lazily — in the
+  // modes that use them rather than at assignment — is what keeps this true.
+  it("still exits 0 for git store when HOME is unset", async () => {
+    const home = sandbox();
+
+    const r = await run(home, ["git", "store"], {
+      stdin: "protocol=https\nhost=github.com\nusername=x\npassword=y\n\n",
+      env: { HOME: "", THRONG_CONFIG: "", THRONG_CREDS_CACHE: "" },
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe("");
+  });
+
+  it("rejects a relative HOME rather than resolving against the cwd", async () => {
+    const home = sandbox();
+
+    const r = await run(home, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { HOME: "home/user", THRONG_CONFIG: "", THRONG_CREDS_CACHE: "" },
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("absolute path");
   });
 });
 

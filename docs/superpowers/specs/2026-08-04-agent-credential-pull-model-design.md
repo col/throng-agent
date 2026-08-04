@@ -57,7 +57,7 @@ without the Throng platform.
 
 Crucially it is honoured **inside the helper**, not by a second code path. The
 git config, the `gh` shim, PATH resolution, `credential.useHttpPath`,
-`/dev/shm/throng` permissions and the credential protocol are byte-identical in both
+`$HOME/.throng` permissions and the credential protocol are byte-identical in both
 modes; only the final step differs — read a file versus POST. A standalone test
 therefore exercises the production wiring, which is the entire point of having
 the escape hatch.
@@ -88,12 +88,15 @@ Two build-time smoke checks follow the install, so a broken helper fails the
 build rather than the first clone: `throng-creds git store </dev/null` proves
 the script parses and exits 0, and `gh --version` proves the shim resolves
 `gh.real` and declines cleanly with no config present. The second reaches the
-cache path and so creates `/dev/shm/throng`; a following `rm -rf /dev/shm/throng`
-keeps that build-time side effect out of the shipped image, which must start with
-nothing configured. (Belt and braces: BuildKit mounts `/dev/shm` as a fresh tmpfs
-for each `RUN`, so the directory cannot reach the layer even without the `rm`.
-That is a property of the builder rather than of the Dockerfile, so the `rm`
-stays.)
+cache path and so creates `$HOME/.throng` — `/root/.throng`, since the build runs
+as root; `rm -rf "${HOME:?}/.throng"` keeps that build-time side effect out of the
+shipped image, which must start with nothing configured. That `rm` is load-bearing
+now, unlike the `/dev/shm` one it replaces: BuildKit mounts `/dev/shm` as a fresh
+tmpfs per `RUN`, so that directory could never reach a layer whether or not it was
+removed, whereas `/root` is an ordinary layer and this one would.
+
+`git store` is the smoke check rather than `git get` partly because it is the one
+mode that resolves neither path, so it needs no `HOME` and touches no cache.
 
 ### Git configuration
 
@@ -113,30 +116,59 @@ default scope.
 The helper is referenced by absolute path because git invokes helpers via
 `/bin/sh` and `/usr/local/bin` may not be on that PATH.
 
-`GIT_TERMINAL_PROMPT=0` moves into the image as an `ENV`, alongside the git
-config and for the same reason: it is a constant. It used to be set by
-`injectGitCredentials()` on the runtime's `process.env`, where every child
-inherited it — but that function is deleted here, and its replacement in
-`bootstrap/git.ts` passes the variable only in the environment of the runtime's
-own clone and checkout subprocesses. The agent's `git push` an hour later is not
-descended from any of them, so nothing would reach it.
+When the helper declines or dies — a 403, an unreachable service, an
+unconfigured sandbox — git falls back to asking for a username. Without a TTY
+that is an immediate error; with one it blocks, and the README's standalone
+recipe reaches into the container over `docker exec`. A blocked git operation is
+the worst outcome this design has, and `GIT_TERMINAL_PROMPT=0` closes the only
+path by which an interactive credential could be typed in. It is not a
+credential, so the env-freezing objection that rules out `GH_TOKEN` does not
+apply to it.
 
-That gap matters. When the helper declines or dies — a 403, an unreachable
-service, an unconfigured sandbox — git falls back to asking for a username.
-Without a TTY that is an immediate error; with one it blocks, and the README's
-standalone recipe reaches into the container over `docker exec`. A blocked git
-operation is the worst outcome this design has. As an `ENV` it reaches every
-process in the sandbox regardless of what spawned it, and it closes the only
-path by which an interactive credential could be typed in.
+It is set in **three** places, because no single one of them covers every
+process, and the gaps do not overlap:
 
-It is not a credential, so the env-freezing objection that rules out `GH_TOKEN`
-does not apply to it. `bootstrap/git.ts` keeps its per-subprocess copy as well,
-so that module is correct outside the image, where its unit tests run.
+| Where | Covers |
+|---|---|
+| `startControlServer()`, on the runtime's `process.env`, as its first statement | the runtime and everything **descended** from it — the engine, its shells, the agent's `git push` an hour into the task |
+| `/etc/profile.d/throng.sh` in the image | **login shells**, whoever starts them — including ones E2B's envd spawns, which are *siblings* of the runtime and inherit nothing from it |
+| `ENV GIT_TERMINAL_PROMPT=0` in the image | everything, under `docker run` only |
+
+`bootstrap/git.ts` keeps a per-subprocess copy as well, so that module is correct
+when used outside the runtime, where its unit tests run.
+
+The runtime assignment is the one that reproduces what the deleted
+`injectGitCredentials()` did. The `profile.d` file exists because that assignment
+is deliberately *not* a whole-sandbox guarantee — a process envd starts is not a
+child of the runtime — and a file is read at shell startup, which is after the
+snapshot, where an image `ENV` is applied at `execve` and was therefore never
+seen. Same reason the credentials themselves live in a file. Residual gap,
+accepted: a non-login `bash -c` reads no profile and, if it is not descended from
+the runtime, gets nothing. The blocking failure needs a TTY and a TTY means an
+interactive shell, so what remains uncovered fails fast rather than hanging.
+
+An earlier version of this design used the image `ENV` **alone**, on the reasoning
+that it is a constant like the git config. That was wrong for a reason worth
+recording: **the E2B runtime inherits no image `ENV` at all**. It was verified
+with `docker run`, which does inherit it — the second false negative of exactly
+the same shape as the uid one (see "Settled"), one release later. The `ENV` is
+kept because it costs nothing and is correct for `docker run`, but in E2B it does
+nothing whatsoever.
+
+### Workspace root
+
+`defaultBootDeps()` defaults `workspaceRoot` to `$HOME/workspace`, not
+`/workspace`. Creating a top-level directory needs root; E2B runs the sandbox as
+uid 1000, `/workspace` does not exist there, and `mkdir /workspace` is Permission
+denied. The `WORKSPACE_DIR` override is kept — it is still the documented way to
+put the workspace elsewhere — but it cannot be the *delivery* mechanism under
+E2B, for the same reason the `ENV` above cannot: nothing sets it in the runtime's
+environment. The default has to be correct on its own.
 
 ### Boot sequence
 
 ```
-initialise → write /dev/shm/throng/config.json     ← moved to the front
+initialise → write $HOME/.throng/config.json      ← moved to the front
            → clone repos                        ← unauthenticated at the call site
            → run setup commands                 ← now have working git + gh
            → inject commit identity + engine credentials
@@ -245,7 +277,7 @@ no expiry arithmetic. The cache format is designed to make that possible.
 
 ### Cache format
 
-`/dev/shm/throng/cache/<sanitised-key>`:
+`$HOME/.throng/cache/<sanitised-key>`:
 
 ```
 1754286260                    ← serve_until: expires_at MINUS skew, precomputed
@@ -311,7 +343,7 @@ task's default scope.
 
 On a cache miss, under the lock:
 
-1. No readable `/dev/shm/throng/config.json` → **decline**: exit 0 with no output.
+1. No readable `$HOME/.throng/config.json` → **decline**: exit 0 with no output.
    Public clones keep working in an uninitialised sandbox, which is what they
    did before this change.
 2. `github_token` present → serve it with both `serve_until` and
@@ -459,7 +491,7 @@ the repo's index. `RepoSpec` loses its `token` field; `BaseManifest` gains
 
 ### Config file
 
-Written to `/dev/shm/throng/config.json`, mode `0600`, inside `/dev/shm/throng` at
+Written to `$HOME/.throng/config.json`, mode `0600`, inside `$HOME/.throng` at
 `0700`, alongside `cache/`:
 
 ```json
@@ -478,30 +510,63 @@ values later without inventing an environment-variable naming scheme.
 It is written once, at initialise, and never rewritten. See "Identity token
 lifetime" below.
 
-**Why `/dev/shm` and not `/run`.** This design originally put both files under
-`/run/throng`, and the first integration test died at boot with
+**Why `$HOME/.throng`.** This design originally put both files under `/run/throng`,
+and the first integration test died at boot with
 `EACCES: permission denied, mkdir '/run/throng'`. E2B's envd runs the sandbox as
-`uid=1000(user)`, and `/run` is tmpfs owned `root:root` mode `755`. `/dev/shm` is
-tmpfs as well — so a credential still never lands on a persisted filesystem, which
-was the whole reason for choosing `/run` — but it is mode `1777`, so it is
-writable without privilege, and it behaves identically under `docker run` and
-under E2B. Pre-creating `/run/throng` in the Dockerfile is not an alternative:
-`/run` is tmpfs and is mounted fresh at boot, so an image-time directory does not
-survive. `sudo mkdir /run/throng` was rejected because it would make the runtime
-depend on sudoers membership for a boot step; the runtime should need no
-privilege at all.
+`uid=1000(user)`, and `/run` is tmpfs owned `root:root` mode `755`. Pre-creating
+`/run/throng` in the Dockerfile is not an alternative: `/run` is tmpfs and is
+mounted fresh at boot, so an image-time directory does not survive.
+`sudo mkdir /run/throng` was rejected because it would make the runtime depend on
+sudoers membership for a boot step; the runtime should need no privilege at all.
 
-`/dev/shm` being world-writable does not weaken the file: the directory is created
-`0700` and the file `0600` by the same code as before, and `/dev/shm`'s sticky bit
-stops another uid removing or renaming what we create. A different uid could
-pre-create `/dev/shm/throng` to make `writeCredentialConfig`'s `chmod` fail, but
-that fails the boot at the credentials step rather than leaking anything, and
-there is no boundary to cross in the first place: the runtime, `git`, `gh` and the
-agent's own shells all run as the same uid, and the agent is already allowed to
-read the identity token (see "Decision"). One consequence is that
-`check_cache_dir` names `/dev/shm` explicitly as a refused value — its two-segment
-depth rule refuses `/run` for free but not `/dev/shm`, which is now the parent of
-the default cache path and therefore the plausible mis-set.
+`$HOME` needs no privilege on either host. Unlike `/dev/shm` — the intermediate
+choice, mode `1777` — its parent is owned by the user (`/home/user` is
+`user:user 755`), so no other uid can pre-create or squat the directory. The
+directory is still created `0700` and the file `0600`, so the guarantee does not
+rest on the parent's mode either way.
+
+**The trade, stated plainly:** `$HOME` is disk-backed. `/run` and `/dev/shm` were
+both chosen because they are tmpfs, so a credential would never land on a
+persisted filesystem, and that property is given up here — the identity token is
+written to a disk-backed layer that survives a pause. This is accepted, on two
+grounds. E2B snapshots the sandbox's *memory* when it pauses, so tmpfs bought
+much less than it appeared to: a paused sandbox's `/dev/shm` contents are in the
+snapshot as surely as its disk is. And this design already accepts that the agent
+can read the identity token (see "Decision"), which is a strictly larger
+concession than where the file sits. It is not nothing, and it should not be
+described as nothing.
+
+**`HOME` is read, never guessed — this is the one real hazard in the change.**
+Node's `os.homedir()` returns `$HOME` when set and falls back to the passwd entry
+when not; bash's `$HOME` has no fallback. The runtime writes this file and
+`throng-creds` reads it, so if the two ever resolved `~` differently the runtime
+would write one file and the helper would look for another — and the helper's
+contract for "no config" is a silent decline, so the symptom would be a correctly
+initialised sandbox quietly cloning unauthenticated. That is the same
+silent-failure class as the bug being fixed, and harder to see. Both sides
+therefore read `$HOME` and nothing else, treat empty as unset (matching bash's
+`${HOME:-}`), and **die rather than fall back** when it is absent: `/.throng` is
+root-owned and uncreatable as uid 1000, which is exactly the original failure. In
+E2B `HOME=/home/user` is one of the handful of variables the runtime does get.
+
+`check_cache_dir` gains two refusals as a direct consequence, because
+`git credential erase` is an `rm -rf` of whatever `THRONG_CREDS_CACHE` names:
+
+- **`$HOME` itself.** It sails through the two-segment depth rule (`/home/user`'s
+  parent is `/home`, not `/`), and it is now the parent of the cache, the config
+  file *and* the workspace the task's repos were cloned into. "Just point it at
+  `~`" is the mis-set `/run` used to be, and it would destroy the entire task.
+- **The directory holding `config.json`.** A sharper version of the same
+  argument: everything else `erase` destroys is re-mintable on the next
+  operation, but that file is write-once with no rotation path into a running
+  sandbox, so losing it takes away the only identity the sandbox will ever have.
+
+`/dev/shm` stays on the refused list even though it is no longer the default's
+parent. Two reasons outlive that: it is still the one two-segment path in the
+image that is a world-writable mount shared with every process in the sandbox,
+and it *was* the default one release ago, so a template or operator carrying the
+old value forward is a live possibility rather than a hypothetical. The cost is a
+single `case` arm.
 
 ## Credentials API contract
 
@@ -558,7 +623,7 @@ Idempotency-Key: <uuid>
 
 The task token must remain valid for the task's **entire lifetime, including
 pauses**. It is retired by revocation, never by expiry. There is no rotation
-path into a running sandbox, and `/dev/shm/throng/config.json` is write-once.
+path into a running sandbox, and `$HOME/.throng/config.json` is write-once.
 
 This is a decision, not an oversight: the alternative is a rotation endpoint,
 and it was judged not worth building until the assumption is shown to be wrong.
@@ -623,46 +688,88 @@ repeatable procedure in the README.
 
 ## To verify during implementation
 
-**Settled, and it was settled wrongly the first time — read this before trusting
-a `docker run` result again.** This section previously read: "The image sets no
+**Settled, and it was settled wrongly twice — read this before trusting a
+`docker run` result again.** This section originally read: "The image sets no
 `USER` and runs as uid 0, confirmed against a real container build … the uid
 concern is moot." Both halves of that were false in production, and the first
 integration test failed at boot with
 `EACCES: permission denied, mkdir '/run/throng'`.
 
-The verification was a false negative because of *how* it was run. `docker run`
-honours the image's `USER`, and this image sets none, so it ran as root and
-`mkdir /run/throng` succeeded. **E2B does not honour it**: envd starts the
+Two facts about E2B, both measured on a live sandbox, and both of which
+`docker run` hides:
+
+**1. The runtime runs as an unprivileged uid, not root.** `docker run` honours
+the image's `USER`, and this image sets none, so it ran as root and
+`mkdir /run/throng` succeeded. **E2B does not honour `USER`**: envd starts the
 sandbox process as `uid=1000(user)`. The same image therefore runs under two
-different uids depending on the host, and only one of them can write `/run`.
-Confirmed against a live E2B sandbox:
+different uids depending on the host.
 
 - `id` → `uid=1000(user) gid=1000(user) groups=1000(user),27(sudo)`
 - `/run` → tmpfs, `root:root`, `755`; `mkdir /run/throng` → Permission denied
 - `/run/user/1000` does not exist and `XDG_RUNTIME_DIR` is unset
 - `/dev/shm` → tmpfs, `root:root`, `1777`, writable by `user`
 - `/tmp` and `/var/tmp` → `1777` but disk-backed, not tmpfs
+- `/workspace` does not exist; `mkdir /workspace` → Permission denied
+- `/home/user` → `user:user`, `755`; `mkdir ~/.throng` succeeds
 - passwordless sudo works, but the runtime does not use it
 
-The fix moves both files to `/dev/shm/throng` (see "Config file" for the full
-rationale and the rejected alternatives). Mode `0600` on the file inside a `0700`
-directory is unchanged and still correct; the `0711` / `0644` fallback
-contemplated here is still not needed, because a single uid still runs the
-runtime, `git`, `gh` and the agent's shells — it is 1000 under E2B and 0 under
-`docker run`, not a mix of both within one host.
+**2. The runtime's environment is scrubbed, and inherits no image `ENV`.** The
+`GIT_TERMINAL_PROMPT=0` that the previous release added as a Dockerfile `ENV` was
+verified with `docker run` — which *does* inherit image `ENV` — and is simply
+absent in E2B. That is a false negative of exactly the same shape as the uid one,
+found the same way, one release later. The agent runtime process's complete
+environment in a live sandbox is:
 
-The general lesson, which is the part worth carrying to the next feature: a
-container check that does not pin the uid proves nothing about E2B. Anything that
-writes outside the workspace must be exercised with `docker run --user 1000:1000`
-as well as plain `docker run`.
+```
+E2B_EVENTS_ADDRESS, E2B_SANDBOX, E2B_SANDBOX_ID, E2B_TEMPLATE_ID,
+HOME=/home/user, LOGNAME=user,
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin,
+PWD=/home/user, USER=user
+```
 
-**Still open.** That the contents of `/dev/shm` survive pause and resume in a live
-E2B sandbox. This has not been confirmed against a running sandbox, and moving off
-`/run` does not change the question — both are tmpfs. If the cache does not survive
-a resume the design still works: the next operation takes the slow path and
-re-mints. But if `/dev/shm/throng/config.json` does not survive, the sandbox loses
-its identity token with no way to be handed another, since the file is write-once
-(see "Identity token lifetime").
+Neither the template's `setEnvs` nor the Dockerfile's `ENV` reach it — no
+`CONTROL_PORT`, no `WORKSPACE_DIR`, no `ADVERTISE_PROTOCOL`, and no `LANG`
+despite `ENV LANG=C.UTF-8` being in the image. Everything works today only
+because the code's defaults happen to be right.
+
+**The generalisable rule: no image-level or template-level environment variable
+can be relied upon.** Anything the runtime needs must come from a code default,
+from `/api/initialise`, or from a file. This is the same root cause as the
+original decision to put credentials in a config file rather than the
+environment — a process's environment is fixed at `execve()`, and this runtime's
+`execve()` happened during template build, inside a snapshot, long before any of
+the values anyone wants to set existed. Env vars remain useful as *overrides* for
+a locally-run container; they are not a delivery mechanism.
+
+And the rule for verifying it: **a container check that pins neither the uid nor
+the environment proves nothing about E2B.** Reproduce both halves —
+`docker run --user 1000:1000` with the image's own `ENV` explicitly blanked —
+before believing a result about anything that writes outside the workspace or
+reads a variable.
+
+The three consequences are recorded above: credentials at `$HOME/.throng` (see
+"Config file"), the workspace at `$HOME/workspace` (see "Workspace root"), and
+`GIT_TERMINAL_PROMPT` set by the runtime (see "Git configuration"). Mode `0600`
+on the file inside a `0700` directory is unchanged and still correct; the `0711`
+/ `0644` fallback contemplated here is still not needed, because a single uid
+still runs the runtime, `git`, `gh` and the agent's shells — 1000 under E2B and 0
+under `docker run`, not a mix of both within one host.
+
+**Settled by the move.** Whether tmpfs contents survive pause and resume — the
+previous open question — is moot for the config file: `$HOME` is disk-backed, so
+it survives on the same terms as the cloned repos. The cache survives too, which
+is a small bonus rather than a requirement: a lost cache costs one slow path.
+
+**Still open.**
+
+- Whether `LANG` matters in practice. It is unset in E2B despite the image's
+  `ENV`, so the whole sandbox runs in the `C` locale. Nothing has been observed to
+  break, but the fix — if one is wanted — is a runtime assignment like
+  `GIT_TERMINAL_PROMPT`'s, not another `ENV`.
+- `ADVERTISE_HOST` has the same problem with worse consequences: it too never
+  arrives, so `buildAgentConfig` falls back to `localhost` and the A2A agent card
+  advertises `https://localhost:3030`. That is outside this spec's scope but it
+  is the same defect, and it is the next one to look at.
 
 ## Out of scope
 

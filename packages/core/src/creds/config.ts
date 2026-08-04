@@ -1,19 +1,31 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { homeDir } from "../env.js";
 import type { BaseManifest } from "../manifest/types.js";
 
 /**
  * Where throng-creds reads its configuration. The env var exists for tests.
  *
- * Under /dev/shm rather than /run because the sandbox does not run as root
- * everywhere: E2B's envd starts it as uid 1000, while `docker run` honours the
- * image's USER (root). /run is tmpfs owned root:root mode 0755, so
- * `mkdir /run/throng` is EACCES under E2B, and pre-creating it in the image is
- * no help because /run is mounted fresh at boot. /dev/shm is tmpfs too — the
- * token still never reaches a persisted filesystem — and mode 1777, so it needs
- * neither root nor sudo and behaves the same under both hosts.
+ * Under $HOME because the sandbox runs unprivileged: E2B's envd starts it as
+ * uid 1000, while `docker run` honours the image's USER (root). /run — the
+ * original location — is tmpfs owned root:root mode 0755, so `mkdir /run/throng`
+ * is EACCES under E2B, and pre-creating it in the image is no help because /run
+ * is mounted fresh at boot. $HOME needs no privilege on either host, and unlike
+ * /dev/shm (mode 1777) its parent is owned by the user — /home/user is
+ * user:user 755 — so nothing running as another uid can squat the directory.
+ *
+ * The trade is that $HOME is disk-backed rather than tmpfs, so the credential
+ * does land on a persisted layer, which /run and /dev/shm were both chosen to
+ * avoid. Accepted: E2B snapshots memory on pause anyway, so tmpfs bought less
+ * than it looked like it did, and this design already accepts that the agent
+ * can read the token (see the spec's "Decision").
+ *
+ * `||`, not `??`: bash reads this same override as `${THRONG_CONFIG:-…}`, where
+ * an empty value falls back to the default. An empty string here would
+ * otherwise be a path of "", so the runtime and the helper would disagree about
+ * whether the sandbox is configured at all.
  */
-export const CONFIG_PATH = process.env.THRONG_CONFIG ?? "/dev/shm/throng/config.json";
+export const CONFIG_PATH = process.env.THRONG_CONFIG || join(homeDir(), ".throng", "config.json");
 
 /**
  * Writes the configuration `throng-creds` reads on a cache miss.

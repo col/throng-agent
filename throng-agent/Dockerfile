@@ -65,13 +65,15 @@ COPY --from=build /app/throng-agent-codex/package.json ./throng-agent-codex/pack
 COPY --from=build /app/throng-agent/dist ./throng-agent/dist
 COPY --from=build /app/throng-agent/package.json ./throng-agent/package.json
 # Credential plumbing. git and gh both fetch a short-lived token at the moment
-# of use via throng-creds, which reads /dev/shm/throng/config.json — written by
+# of use via throng-creds, which reads $HOME/.throng/config.json — written by
 # POST /api/initialise before any clone.
 #
-# /dev/shm and not /run: this image sets no USER, so `docker run` runs it as
-# root, but E2B's envd runs the same image as uid 1000 — and /run is tmpfs owned
+# $HOME and not /run: this image sets no USER, so `docker run` runs it as root,
+# but E2B's envd runs the same image as uid 1000 — and /run is tmpfs owned
 # root:root 0755, so `mkdir /run/throng` is EACCES there. Pre-creating the
-# directory here would not help, because /run is mounted fresh at boot.
+# directory here would not help, because /run is mounted fresh at boot. $HOME is
+# writable without privilege under either host, and is one of the few things E2B
+# does put in the runtime's environment (HOME=/home/user).
 #
 # The git config is baked in here rather than written at initialise because it
 # is a constant. `useHttpPath` is required, not optional: without it git never
@@ -80,16 +82,16 @@ COPY --from=build /app/throng-agent/package.json ./throng-agent/package.json
 # invokes helpers through /bin/sh, whose PATH may not include /usr/local/bin.
 #
 # The last three are build-time smoke checks: `throng-creds git store` proves the
-# script parses and exits 0, and `gh --version` proves the shim resolves gh.real
-# and declines cleanly with no config present. `gh --version` reaches the cache
-# path and so creates /dev/shm/throng/cache, and the shipped image must start
-# with nothing configured, so the rm removes it.
+# script parses and exits 0 (it is also the one mode that resolves no paths, so
+# it needs no HOME), and `gh --version` proves the shim resolves gh.real and
+# declines cleanly with no config present.
 #
-# Belt and braces, deliberately: BuildKit mounts /dev/shm as a fresh tmpfs for
-# each RUN, so this directory could not reach the layer even without the rm
-# (verified). The rm stays because that is a property of the builder rather than
-# of the Dockerfile, and because it is what keeps the invariant true for any
-# future path that is not on a tmpfs.
+# `gh --version` reaches the cache path and so creates $HOME/.throng/cache —
+# /root/.throng/cache, since the build runs as root — and the shipped image must
+# start with nothing configured, so the rm removes it. This rm is load-bearing
+# now, unlike the /dev/shm one it replaces: BuildKit mounted /dev/shm as a fresh
+# tmpfs per RUN, so that directory could never reach a layer whether or not it
+# was removed. /root is an ordinary layer and this one would.
 RUN install -m 0755 /app/packages/core/dist/creds/throng-creds.sh /usr/local/bin/throng-creds \
  && install -m 0755 /app/packages/core/dist/creds/gh-shim.sh /usr/local/bin/gh \
  && git config --system credential.helper '/usr/local/bin/throng-creds git' \
@@ -97,26 +99,55 @@ RUN install -m 0755 /app/packages/core/dist/creds/throng-creds.sh /usr/local/bin
  && git config --system url."https://github.com/".insteadOf git@github.com: \
  && throng-creds git store </dev/null \
  && gh --version \
- && rm -rf /dev/shm/throng
-# Part of the same constant as the git config above, and it belongs in the image
-# for the same reason. When throng-creds declines or dies — a 403, an unreachable
+ && rm -rf "${HOME:?}/.throng" \
+ && printf 'export GIT_TERMINAL_PROMPT=0\n' > /etc/profile.d/throng.sh
+# The third of three places GIT_TERMINAL_PROMPT is set, and each covers a
+# different set of processes. See the ENV below for why one is not enough:
+#
+#   startControlServer()'s process.env  → the runtime and everything DESCENDED
+#                                         from it: the engine, its shells, the
+#                                         agent's `git push` an hour later
+#   /etc/profile.d/throng.sh (this)     → login shells, whoever starts them —
+#                                         including ones E2B's envd spawns, which
+#                                         are SIBLINGS of the runtime and inherit
+#                                         nothing from it
+#   ENV GIT_TERMINAL_PROMPT=0 (below)   → everything, under `docker run` only
+#
+# A file rather than another ENV because a file is read at shell startup, which
+# is after the snapshot, whereas an image ENV is applied at execve and E2B's
+# resumed runtime never saw it. This is the same reason the credentials
+# themselves live in a file. It is still not total — a non-login `bash -c` reads
+# no profile — but the blocking case needs a TTY, and a TTY means an interactive
+# shell.
+# Every ENV below is belt and braces. None of them reaches production.
+#
+# E2B's agent runtime process inherits NO image ENV and no template `setEnvs`:
+# the runtime is started during template build and captured in the snapshot, and
+# the environment it is resumed with is scrubbed down to roughly E2B_*, HOME,
+# LOGNAME, PATH, PWD and USER. Measured on a live sandbox — not even LANG
+# survives, despite the line below. `docker run` DOES inherit image ENV, which is
+# how an image-only mechanism could look verified and still be dead in
+# production. So: nothing the runtime needs may come from here. It must come
+# from a code default, from /api/initialise, or from a file.
+#
+# These stay because they cost nothing and are correct for `docker run`, which is
+# how the image is exercised standalone.
+#
+# GIT_TERMINAL_PROMPT: when throng-creds declines or dies — a 403, an unreachable
 # service, an unconfigured sandbox — git falls back to asking for a username.
 # Without a TTY that is an immediate error; WITH one it blocks forever, and the
 # README's standalone recipe reaches in over `docker exec`. A blocked git
-# operation is the worst outcome this design has, so the prompt is disabled
-# process-wide rather than per-subprocess.
-#
-# ENV, not the runtime's process.env: the runtime used to set it during boot and
-# every child inherited it, but the agent's own `git push` an hour later is not a
-# child of any boot-time process. Set here it reaches every process in the
-# sandbox, whatever spawned it. It also removes the only path by which an
-# interactive credential could be typed in.
+# operation is the worst outcome this design has, which is why it is set three
+# times (see the profile.d note above). Under E2B this ENV does nothing at all.
 ENV GIT_TERMINAL_PROMPT=0
+# CONTROL_PORT: the runtime's own default is 8080, which is what E2B gets.
 ENV CONTROL_PORT=8080
 # node:20-slim (Debian 12) sets no LANG, so every process in the sandbox inherits
 # the `C` locale. That makes locale-sensitive toolchains misbehave on non-ASCII
-# paths and output. `C.UTF-8` is built into glibc >= 2.35, so it needs no 
-# `locales` package and no locale-gen.
+# paths and output. `C.UTF-8` is built into glibc >= 2.35, so it needs no
+# `locales` package and no locale-gen. Note that this one is `docker run` only
+# and has no runtime counterpart yet: under E2B the sandbox really is in the `C`
+# locale.
 ENV LANG=C.UTF-8
 EXPOSE 8080 3030
 CMD ["node", "throng-agent/dist/index.js"]

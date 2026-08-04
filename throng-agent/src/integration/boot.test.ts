@@ -11,7 +11,7 @@ function fakeDeps(): BootDeps {
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     writeCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
-    workspaceRoot: "/workspace",
+    workspaceRoot: "/home/user/workspace",
   };
 }
 
