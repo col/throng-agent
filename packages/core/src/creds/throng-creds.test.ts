@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -16,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 const SCRIPT = fileURLToPath(new URL("./throng-creds.sh", import.meta.url));
+const SHIM = fileURLToPath(new URL("./gh-shim.sh", import.meta.url));
 
 export interface RunResult {
   stdout: string;
@@ -603,6 +605,12 @@ describe("throng-creds single-flight", () => {
     expect(stub.requests).toHaveLength(1);
   }, 30_000);
 
+  // The wait is a plain tick count, so these tests run it at 10 × 0.2s = 2s
+  // rather than the production 75 × 0.2s = 15s. What they check is relative —
+  // waits, then reclaims, then proceeds; declines instead of stalling — and that
+  // holds at any tick count, while 15s a test does not hold a developer.
+  const fastLock = { THRONG_CREDS_LOCK_TICKS: "10" };
+
   // `mkdir` fails for reasons other than contention, and waiting fixes none of
   // them. Without that distinction this decline costs the full LOCK_TICKS —
   // measured at 17s against the 0.02s asserted here.
@@ -615,12 +623,14 @@ describe("throng-creds single-flight", () => {
     const started = Date.now();
     const r = await run(dir, ["git", "get"], {
       stdin: getStdin("acme/app.git"),
-      env: { THRONG_CREDS_CACHE: join(dir, "blocker", "cache") },
+      env: { ...fastLock, THRONG_CREDS_CACHE: join(dir, "blocker", "cache") },
     });
 
     expect(r.code).toBe(0);
     expect(r.stdout).toBe("");
-    expect(Date.now() - started).toBeLessThan(5_000);
+    // Comfortably inside the 2s budget above: a regression to "sleep on every
+    // mkdir failure" spends the whole of it and then some.
+    expect(Date.now() - started).toBeLessThan(1_000);
   }, 30_000);
 
   it("gives up on a lock that never clears and mints anyway", async () => {
@@ -630,7 +640,10 @@ describe("throng-creds single-flight", () => {
     const lock = join(dir, "cache", "git_github.com_acme_app.lock");
     mkdirSync(lock, { recursive: true });
 
-    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: fastLock,
+    });
 
     expect(r.stdout).toContain("password=ghs_waited");
     expect(r.stderr).toContain("proceeding without the single-flight lock");
@@ -652,16 +665,103 @@ describe("throng-creds single-flight", () => {
     const longAgo = new Date(Date.now() - 10 * 60_000);
     utimesSync(lock, longAgo, longAgo);
 
-    const first = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+    const first = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: fastLock,
+    });
 
     expect(first.stdout).toContain("password=ghs_reclaimed");
     expect(existsSync(lock)).toBe(false); // broken, held, then released
 
     rmSync(entry); // force a second miss on the same key
     const started = Date.now();
-    const second = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+    const second = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: fastLock,
+    });
 
     expect(second.stdout).toContain("password=ghs_reclaimed");
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(1_000);
   }, 60_000);
+
+  // Making LOCK_TICKS overridable put a hang one typo away: `[ "$ticks" -ge abc ]`
+  // errors on every iteration, so the timeout branch never fires and the wait
+  // runs forever, stalling the git operation that invoked the helper. Measured
+  // before the guard existed: still spinning after 6s, one bash error per tick.
+  //
+  // Asserted through the warning rather than by holding a lock and timing the
+  // wait, because the fallback IS the 15s production value — proving it that way
+  // would cost the suite the 15s this override exists to avoid. The warning is
+  // emitted by the same two-line branch that assigns the fallback.
+  it("warns and falls back to the production wait on a junk tick count", async () => {
+    const dir = sandbox();
+    writeConfig(dir, { github_token: "ghp_junktick" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CREDS_LOCK_TICKS: "abc" },
+    });
+
+    expect(r.stderr).toContain("non-numeric THRONG_CREDS_LOCK_TICKS");
+    expect(r.stdout).toContain("password=ghp_junktick");
+  });
+});
+
+/**
+ * The shim resolves throng-creds and gh.real through THRONG_CREDS_BIN and
+ * GH_REAL_BIN so it can be exercised without installing anything. In the image
+ * both default to their /usr/local/bin paths.
+ */
+function fakeGh(dir: string): string {
+  const path = join(dir, "gh-real");
+  writeFileSync(
+    path,
+    ["#!/bin/bash", 'printf "GH_TOKEN=%s\\n" "${GH_TOKEN-<unset>}"', 'printf "args=%s\\n" "$*"', ""].join("\n"),
+  );
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function runShim(dir: string, args: string[]): Promise<RunResult> {
+  return new Promise((resolve) => {
+    const child = execFile(
+      "bash",
+      [SHIM, ...args],
+      {
+        env: {
+          ...process.env,
+          THRONG_CONFIG: join(dir, "config.json"),
+          THRONG_CREDS_CACHE: join(dir, "cache"),
+          THRONG_CREDS_BIN: `bash ${SCRIPT}`,
+          GH_REAL_BIN: fakeGh(dir),
+        },
+      },
+      (err, stdout, stderr) => {
+        resolve({ stdout, stderr, code: err ? ((err as { code?: number }).code ?? 1) : 0 });
+      },
+    );
+    child.stdin?.end("");
+  });
+}
+
+describe("gh shim", () => {
+  it("runs gh with a freshly fetched token and forwards its arguments", async () => {
+    const dir = sandbox();
+    writeConfig(dir, { github_token: "ghp_shim" });
+
+    const r = await runShim(dir, ["pr", "create", "--fill"]);
+
+    expect(r.stdout).toContain("GH_TOKEN=ghp_shim");
+    expect(r.stdout).toContain("args=pr create --fill");
+  });
+
+  // Setting GH_TOKEN to "" would make gh report an auth rejection. Leaving it
+  // unset gets gh's own "not logged in" message, which is the true problem.
+  it("leaves GH_TOKEN unset when throng-creds declines", async () => {
+    const dir = sandbox();
+
+    const r = await runShim(dir, ["pr", "list"]);
+
+    expect(r.stdout).toContain("GH_TOKEN=<unset>");
+  });
 });

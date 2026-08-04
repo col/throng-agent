@@ -24,12 +24,26 @@ SKEW=300              # serve_until = expires_at - SKEW
 # again: a changed static token cannot appear in a running sandbox, so a cache
 # entry minted from it can never go stale relative to its source.
 STATIC_TTL=315360000
-LOCK_TICKS=75         # × 0.2s = 15s before giving up on the lock
+# × 0.2s = 15s before giving up on the lock. Overridable only so the test suite
+# can assert the wait-then-reclaim-then-proceed behaviour without spending 15s a
+# test on it; the behaviour is identical at any tick count.
+LOCK_TICKS="${THRONG_CREDS_LOCK_TICKS:-75}"
 LOCK_STALE_MIN=2      # a live holder is bounded by curl's --max-time/--retry-max-time
 
 warn() { printf 'throng-creds: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
 now()  { date +%s; }
+
+# Validated here rather than beside the assignment above only because `warn`
+# does not exist yet up there. A non-numeric LOCK_TICKS does not merely mistime
+# the wait: `[ "$ticks" -ge "$LOCK_TICKS" ]` errors on every iteration, so the
+# timeout branch is never reached and the loop waits forever — the worst failure
+# mode a credential helper has, since it stalls the git operation that called it.
+case "$LOCK_TICKS" in
+  ''|*[!0-9]*)
+    warn "ignoring non-numeric THRONG_CREDS_LOCK_TICKS '$LOCK_TICKS'"
+    LOCK_TICKS=75 ;;
+esac
 
 # git_erase removes this directory whole, as root in production, and lock
 # directories live in it too — so a mis-set THRONG_CREDS_CACHE is an `rm -rf` on
