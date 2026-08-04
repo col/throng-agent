@@ -7,11 +7,16 @@ at the moment of use, and no installation token is ever placed in the sandbox's 
 
 A process's environment is fixed at `execve()`, so a token injected at boot can never be refreshed —
 which broke every task outliving its 1 hour installation token, and every task paused waiting on user
-input. The sandbox now holds only a task-scoped identity token in `/run/throng/config.json`, and a
+input. The sandbox now holds only a task-scoped identity token in `/dev/shm/throng/config.json`, and a
 bash helper (`throng-creds`, shipped in `dist/creds/`) exchanges it for a GitHub token per operation:
 as git's system credential helper, and through a `gh` shim. It caches per repo, single-flights
 concurrent misses, and declines silently when unconfigured, so public clones still work in a sandbox
 that was never initialised.
+
+Both locations sit under `/dev/shm` (overridable with `THRONG_CONFIG` and `THRONG_CREDS_CACHE`). It
+is tmpfs, so a credential never reaches a persisted filesystem, and it is world-writable, so the
+runtime needs neither root nor sudo — `/run` is root-owned `0755` and hosts do not agree on the uid
+the sandbox runs as (E2B runs it as uid 1000, `docker run` as the image's root).
 
 The initialise manifest gains an optional `credentials: { url, token }` block naming the credentials
 API. `github_token` is unchanged, still falls back to the `GITHUB_TOKEN` env var, and now wins over

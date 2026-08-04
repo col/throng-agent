@@ -2,8 +2,18 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { BaseManifest } from "../manifest/types.js";
 
-/** Where throng-creds reads its configuration. The env var exists for tests. */
-export const CONFIG_PATH = process.env.THRONG_CONFIG ?? "/run/throng/config.json";
+/**
+ * Where throng-creds reads its configuration. The env var exists for tests.
+ *
+ * Under /dev/shm rather than /run because the sandbox does not run as root
+ * everywhere: E2B's envd starts it as uid 1000, while `docker run` honours the
+ * image's USER (root). /run is tmpfs owned root:root mode 0755, so
+ * `mkdir /run/throng` is EACCES under E2B, and pre-creating it in the image is
+ * no help because /run is mounted fresh at boot. /dev/shm is tmpfs too — the
+ * token still never reaches a persisted filesystem — and mode 1777, so it needs
+ * neither root nor sudo and behaves the same under both hosts.
+ */
+export const CONFIG_PATH = process.env.THRONG_CONFIG ?? "/dev/shm/throng/config.json";
 
 /**
  * Writes the configuration `throng-creds` reads on a cache miss.

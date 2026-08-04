@@ -65,8 +65,13 @@ COPY --from=build /app/throng-agent-codex/package.json ./throng-agent-codex/pack
 COPY --from=build /app/throng-agent/dist ./throng-agent/dist
 COPY --from=build /app/throng-agent/package.json ./throng-agent/package.json
 # Credential plumbing. git and gh both fetch a short-lived token at the moment
-# of use via throng-creds, which reads /run/throng/config.json — written by
+# of use via throng-creds, which reads /dev/shm/throng/config.json — written by
 # POST /api/initialise before any clone.
+#
+# /dev/shm and not /run: this image sets no USER, so `docker run` runs it as
+# root, but E2B's envd runs the same image as uid 1000 — and /run is tmpfs owned
+# root:root 0755, so `mkdir /run/throng` is EACCES there. Pre-creating the
+# directory here would not help, because /run is mounted fresh at boot.
 #
 # The git config is baked in here rather than written at initialise because it
 # is a constant. `useHttpPath` is required, not optional: without it git never
@@ -77,8 +82,14 @@ COPY --from=build /app/throng-agent/package.json ./throng-agent/package.json
 # The last three are build-time smoke checks: `throng-creds git store` proves the
 # script parses and exits 0, and `gh --version` proves the shim resolves gh.real
 # and declines cleanly with no config present. `gh --version` reaches the cache
-# path and so creates /run/throng/cache; the rm keeps that build-time side effect
-# out of the shipped image, which must start with nothing configured.
+# path and so creates /dev/shm/throng/cache, and the shipped image must start
+# with nothing configured, so the rm removes it.
+#
+# Belt and braces, deliberately: BuildKit mounts /dev/shm as a fresh tmpfs for
+# each RUN, so this directory could not reach the layer even without the rm
+# (verified). The rm stays because that is a property of the builder rather than
+# of the Dockerfile, and because it is what keeps the invariant true for any
+# future path that is not on a tmpfs.
 RUN install -m 0755 /app/packages/core/dist/creds/throng-creds.sh /usr/local/bin/throng-creds \
  && install -m 0755 /app/packages/core/dist/creds/gh-shim.sh /usr/local/bin/gh \
  && git config --system credential.helper '/usr/local/bin/throng-creds git' \
@@ -86,7 +97,7 @@ RUN install -m 0755 /app/packages/core/dist/creds/throng-creds.sh /usr/local/bin
  && git config --system url."https://github.com/".insteadOf git@github.com: \
  && throng-creds git store </dev/null \
  && gh --version \
- && rm -rf /run/throng
+ && rm -rf /dev/shm/throng
 # Part of the same constant as the git config above, and it belongs in the image
 # for the same reason. When throng-creds declines or dies — a 403, an unreachable
 # service, an unconfigured sandbox — git falls back to asking for a username.

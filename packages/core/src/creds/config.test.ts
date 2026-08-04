@@ -1,7 +1,8 @@
 import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { writeCredentialConfig } from "./config.js";
 import type { BaseManifest } from "../manifest/types.js";
 
@@ -68,8 +69,9 @@ describe("writeCredentialConfig", () => {
 
   // mkdirSync's `mode` applies only when it creates the directory — exactly the
   // limitation writeFileSync has, and the reason the file gets a follow-up chmod.
-  // A pre-existing /run/throng with looser bits would otherwise leave the token
-  // file readable to anyone who can traverse the directory.
+  // A pre-existing config directory with looser bits would otherwise leave the
+  // token file readable to anyone who can traverse it. That is not theoretical
+  // now that the directory lives under a world-writable /dev/shm.
   it("tightens an existing directory that was created world-readable", () => {
     const path = target();
     mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
@@ -97,5 +99,52 @@ describe("writeCredentialConfig", () => {
     writeCredentialConfig(manifest({ github_token: "ghp_second" }), path);
 
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ github_token: "ghp_second" });
+  });
+});
+
+// Every test above passes an explicit path, so none of them would have noticed
+// that the production default was unwritable — and it was. E2B's envd runs the
+// sandbox as uid 1000 while /run is tmpfs owned root:root 0755, so the first
+// integration boot died on `mkdir /run/throng`. Development missed it because
+// `docker run` honours the image's USER, which is root.
+describe("CONFIG_PATH", () => {
+  const original = process.env.THRONG_CONFIG;
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.THRONG_CONFIG;
+    else process.env.THRONG_CONFIG = original;
+    vi.resetModules();
+  });
+
+  // The constant is evaluated at import, so the env has to be set before the
+  // module is loaded — hence the reset and the dynamic import.
+  async function reimport(): Promise<string> {
+    vi.resetModules();
+    return (await import("./config.js")).CONFIG_PATH;
+  }
+
+  it("defaults to /dev/shm/throng/config.json when THRONG_CONFIG is unset", async () => {
+    delete process.env.THRONG_CONFIG;
+
+    expect(await reimport()).toBe("/dev/shm/throng/config.json");
+  });
+
+  it("still honours THRONG_CONFIG when it is set", async () => {
+    process.env.THRONG_CONFIG = "/somewhere/else/config.json";
+
+    expect(await reimport()).toBe("/somewhere/else/config.json");
+  });
+
+  // The runtime writes this file and the bash helper reads it. If the two
+  // defaults drift, a correctly initialised sandbox looks unconfigured: the
+  // helper declines, and every clone silently falls back to unauthenticated.
+  it("agrees with the default compiled into throng-creds.sh", async () => {
+    delete process.env.THRONG_CONFIG;
+    const script = readFileSync(
+      fileURLToPath(new URL("./throng-creds.sh", import.meta.url)),
+      "utf8",
+    );
+
+    expect(script).toContain(`CONFIG_FILE="\${THRONG_CONFIG:-${await reimport()}}"`);
   });
 });

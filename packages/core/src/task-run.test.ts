@@ -107,7 +107,7 @@ describe("TaskRun credential ordering", () => {
   it("fails on the credentials step when the config cannot be written", async () => {
     const d = deps({
       writeCredentialConfig: vi.fn(() => {
-        throw new Error("EACCES: permission denied, mkdir '/run/throng'");
+        throw new Error("EACCES: permission denied, mkdir '/dev/shm/throng'");
       }),
     });
 

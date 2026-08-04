@@ -95,6 +95,15 @@ or neither.
 `repos[].token` is still accepted but ignored. `throng-creds` scopes every
 request to the repo git is talking to, which a static per-repo token cannot.
 
+Whichever mode is in play, `/api/initialise` writes what the helper needs to
+`/dev/shm/throng/config.json` (mode `0600`, in a `0700` directory) and the
+credential cache lives in `/dev/shm/throng/cache`. `/dev/shm` is tmpfs, so no
+credential reaches a persisted filesystem, and it is writable without privilege —
+which matters because the same image runs as root under `docker run` but as
+`uid 1000` under E2B, where `/run` (the original location) is root-owned and
+unwritable. Both paths can be overridden with `THRONG_CONFIG` and
+`THRONG_CREDS_CACHE`.
+
 ### Running standalone
 
 ```bash
@@ -112,6 +121,12 @@ Then confirm the credential wiring end to end:
 ```bash
 docker exec throng-agent bash -lc 'cd /workspace/app && git fetch && gh auth status'
 ```
+
+Note that plain `docker run` starts the container as root, because the image sets
+no `USER`. E2B does not honour `USER` and runs the sandbox as `uid 1000`, so a
+standalone run is **not** a faithful reproduction of production for anything that
+writes outside `/workspace`. Add `--user 1000:1000` to reproduce that half — it is
+what a credential-path bug hid behind once already.
 
 ## What's in the box?
 

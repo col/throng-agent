@@ -598,8 +598,13 @@ describe("throng-creds cache directory guard", () => {
     ["a bare top-level directory", "/tmp"],
     ["a top-level directory with a trailing slash", "/tmp/"],
     ["a relative path", "cache"],
-    ["a path escaping via ..", "/run/throng/../../../etc"],
-    ["a path with a . segment", "/run/./cache"],
+    ["a path escaping via ..", "/dev/shm/throng/../../../etc"],
+    ["a path with a . segment", "/dev/./cache"],
+    // Two segments, so the depth rule lets it through — but it is the tmpfs the
+    // whole sandbox shares AND the parent of the default cache path, which makes
+    // it the mis-set "/run" used to be before the default moved under it.
+    ["the shared tmpfs mount itself", "/dev/shm"],
+    ["the shared tmpfs mount with a trailing slash", "/dev/shm/"],
   ];
 
   it.each(dangerous)("refuses %s on git get", async (_label, value) => {
@@ -673,6 +678,49 @@ describe("throng-creds cache directory guard", () => {
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("password=ghp_legit");
     expect(r.stderr).toBe("");
+  });
+});
+
+// Every other test in this file redirects both locations through the env vars,
+// so nothing above here would notice if the built-in defaults were wrong — and
+// wrong is what they were: /run is tmpfs owned root:root 0755, and E2B runs the
+// sandbox as uid 1000, so the first real boot died on `mkdir /run/throng`.
+describe("throng-creds default locations", () => {
+  const source = readFileSync(SCRIPT, "utf8");
+
+  // Pinned as source rather than behaviour because the paths are absolute and a
+  // test must not write to them. The matching assertion for the TypeScript side
+  // is in config.test.ts; the two must not drift, since the runtime writes the
+  // file this script reads.
+  it("defaults the config file and the cache to /dev/shm/throng", () => {
+    expect(source).toContain('CONFIG_FILE="${THRONG_CONFIG:-/dev/shm/throng/config.json}"');
+    expect(source).toContain('CACHE_DIR="${THRONG_CREDS_CACHE:-/dev/shm/throng/cache}"');
+  });
+
+  // The guard and the default have to agree, and they nearly did not: the depth
+  // rule refuses a two-segment path, and /dev/shm is two segments. It is the
+  // cache directory — one level deeper — that the default names.
+  //
+  // This deliberately does not clean up after itself. On Linux the run creates
+  // /dev/shm/throng/cache, which is exactly what the runtime creates anyway; an
+  // rm here would delete a live sandbox's cache and config if the suite were
+  // ever run inside one. On macOS there is no /dev/shm and the mkdir simply
+  // fails, which the script already tolerates.
+  it("does not refuse its own default cache directory", async () => {
+    const dir = sandbox();
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: {
+        THRONG_CREDS_CACHE: "/dev/shm/throng/cache",
+        THRONG_CONFIG: join(dir, "absent.json"),
+      },
+    });
+
+    // Declines because there is no config, not because the path was refused.
+    expect(r.stderr).toBe("");
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
   });
 });
 

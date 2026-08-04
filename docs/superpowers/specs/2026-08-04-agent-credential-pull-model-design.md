@@ -57,7 +57,7 @@ without the Throng platform.
 
 Crucially it is honoured **inside the helper**, not by a second code path. The
 git config, the `gh` shim, PATH resolution, `credential.useHttpPath`,
-`/run/throng` permissions and the credential protocol are byte-identical in both
+`/dev/shm/throng` permissions and the credential protocol are byte-identical in both
 modes; only the final step differs — read a file versus POST. A standalone test
 therefore exercises the production wiring, which is the entire point of having
 the escape hatch.
@@ -88,9 +88,12 @@ Two build-time smoke checks follow the install, so a broken helper fails the
 build rather than the first clone: `throng-creds git store </dev/null` proves
 the script parses and exits 0, and `gh --version` proves the shim resolves
 `gh.real` and declines cleanly with no config present. The second reaches the
-cache path and so creates `/run/throng`; a following `rm -rf /run/throng` keeps
-that build-time side effect out of the shipped image, which must start with
-nothing configured.
+cache path and so creates `/dev/shm/throng`; a following `rm -rf /dev/shm/throng`
+keeps that build-time side effect out of the shipped image, which must start with
+nothing configured. (Belt and braces: BuildKit mounts `/dev/shm` as a fresh tmpfs
+for each `RUN`, so the directory cannot reach the layer even without the `rm`.
+That is a property of the builder rather than of the Dockerfile, so the `rm`
+stays.)
 
 ### Git configuration
 
@@ -133,7 +136,7 @@ so that module is correct outside the image, where its unit tests run.
 ### Boot sequence
 
 ```
-initialise → write /run/throng/config.json     ← moved to the front
+initialise → write /dev/shm/throng/config.json     ← moved to the front
            → clone repos                        ← unauthenticated at the call site
            → run setup commands                 ← now have working git + gh
            → inject commit identity + engine credentials
@@ -242,7 +245,7 @@ no expiry arithmetic. The cache format is designed to make that possible.
 
 ### Cache format
 
-`/run/throng/cache/<sanitised-key>`:
+`/dev/shm/throng/cache/<sanitised-key>`:
 
 ```
 1754286260                    ← serve_until: expires_at MINUS skew, precomputed
@@ -308,7 +311,7 @@ task's default scope.
 
 On a cache miss, under the lock:
 
-1. No readable `/run/throng/config.json` → **decline**: exit 0 with no output.
+1. No readable `/dev/shm/throng/config.json` → **decline**: exit 0 with no output.
    Public clones keep working in an uninitialised sandbox, which is what they
    did before this change.
 2. `github_token` present → serve it with both `serve_until` and
@@ -456,7 +459,7 @@ the repo's index. `RepoSpec` loses its `token` field; `BaseManifest` gains
 
 ### Config file
 
-Written to `/run/throng/config.json`, mode `0600`, inside `/run/throng` at
+Written to `/dev/shm/throng/config.json`, mode `0600`, inside `/dev/shm/throng` at
 `0700`, alongside `cache/`:
 
 ```json
@@ -474,6 +477,31 @@ values later without inventing an environment-variable naming scheme.
 
 It is written once, at initialise, and never rewritten. See "Identity token
 lifetime" below.
+
+**Why `/dev/shm` and not `/run`.** This design originally put both files under
+`/run/throng`, and the first integration test died at boot with
+`EACCES: permission denied, mkdir '/run/throng'`. E2B's envd runs the sandbox as
+`uid=1000(user)`, and `/run` is tmpfs owned `root:root` mode `755`. `/dev/shm` is
+tmpfs as well — so a credential still never lands on a persisted filesystem, which
+was the whole reason for choosing `/run` — but it is mode `1777`, so it is
+writable without privilege, and it behaves identically under `docker run` and
+under E2B. Pre-creating `/run/throng` in the Dockerfile is not an alternative:
+`/run` is tmpfs and is mounted fresh at boot, so an image-time directory does not
+survive. `sudo mkdir /run/throng` was rejected because it would make the runtime
+depend on sudoers membership for a boot step; the runtime should need no
+privilege at all.
+
+`/dev/shm` being world-writable does not weaken the file: the directory is created
+`0700` and the file `0600` by the same code as before, and `/dev/shm`'s sticky bit
+stops another uid removing or renaming what we create. A different uid could
+pre-create `/dev/shm/throng` to make `writeCredentialConfig`'s `chmod` fail, but
+that fails the boot at the credentials step rather than leaking anything, and
+there is no boundary to cross in the first place: the runtime, `git`, `gh` and the
+agent's own shells all run as the same uid, and the agent is already allowed to
+read the identity token (see "Decision"). One consequence is that
+`check_cache_dir` names `/dev/shm` explicitly as a refused value — its two-segment
+depth rule refuses `/run` for free but not `/dev/shm`, which is now the parent of
+the default cache path and therefore the plausible mis-set.
 
 ## Credentials API contract
 
@@ -530,7 +558,7 @@ Idempotency-Key: <uuid>
 
 The task token must remain valid for the task's **entire lifetime, including
 pauses**. It is retired by revocation, never by expiry. There is no rotation
-path into a running sandbox, and `/run/throng/config.json` is write-once.
+path into a running sandbox, and `/dev/shm/throng/config.json` is write-once.
 
 This is a decision, not an oversight: the alternative is a rotation endpoint,
 and it was judged not worth building until the assumption is shown to be wrong.
@@ -595,18 +623,46 @@ repeatable procedure in the README.
 
 ## To verify during implementation
 
-**Settled.** The image sets no `USER` and runs as uid 0, confirmed against a
-real container build. Mode `0600` on `/run/throng/config.json` inside
-`/run/throng` at `0700` is therefore correct, and the uid concern is moot: the
-same root uid runs the runtime, `git`, `gh` and the agent's shells. The `0711` /
-`0644` fallback contemplated here is not needed and was not implemented.
+**Settled, and it was settled wrongly the first time — read this before trusting
+a `docker run` result again.** This section previously read: "The image sets no
+`USER` and runs as uid 0, confirmed against a real container build … the uid
+concern is moot." Both halves of that were false in production, and the first
+integration test failed at boot with
+`EACCES: permission denied, mkdir '/run/throng'`.
 
-**Still open.** That `/run` is tmpfs in a live E2B sandbox, and that its
-contents survive pause and resume. Neither has been confirmed against a running
-sandbox. If the cache does not survive a resume the design still works — the
-next operation takes the slow path and re-mints — but if `/run/throng/config.json`
-does not survive, the sandbox loses its identity token with no way to be handed
-another, since the file is write-once (see "Identity token lifetime").
+The verification was a false negative because of *how* it was run. `docker run`
+honours the image's `USER`, and this image sets none, so it ran as root and
+`mkdir /run/throng` succeeded. **E2B does not honour it**: envd starts the
+sandbox process as `uid=1000(user)`. The same image therefore runs under two
+different uids depending on the host, and only one of them can write `/run`.
+Confirmed against a live E2B sandbox:
+
+- `id` → `uid=1000(user) gid=1000(user) groups=1000(user),27(sudo)`
+- `/run` → tmpfs, `root:root`, `755`; `mkdir /run/throng` → Permission denied
+- `/run/user/1000` does not exist and `XDG_RUNTIME_DIR` is unset
+- `/dev/shm` → tmpfs, `root:root`, `1777`, writable by `user`
+- `/tmp` and `/var/tmp` → `1777` but disk-backed, not tmpfs
+- passwordless sudo works, but the runtime does not use it
+
+The fix moves both files to `/dev/shm/throng` (see "Config file" for the full
+rationale and the rejected alternatives). Mode `0600` on the file inside a `0700`
+directory is unchanged and still correct; the `0711` / `0644` fallback
+contemplated here is still not needed, because a single uid still runs the
+runtime, `git`, `gh` and the agent's shells — it is 1000 under E2B and 0 under
+`docker run`, not a mix of both within one host.
+
+The general lesson, which is the part worth carrying to the next feature: a
+container check that does not pin the uid proves nothing about E2B. Anything that
+writes outside the workspace must be exercised with `docker run --user 1000:1000`
+as well as plain `docker run`.
+
+**Still open.** That the contents of `/dev/shm` survive pause and resume in a live
+E2B sandbox. This has not been confirmed against a running sandbox, and moving off
+`/run` does not change the question — both are tmpfs. If the cache does not survive
+a resume the design still works: the next operation takes the slow path and
+re-mints. But if `/dev/shm/throng/config.json` does not survive, the sandbox loses
+its identity token with no way to be handed another, since the file is write-once
+(see "Identity token lifetime").
 
 ## Out of scope
 

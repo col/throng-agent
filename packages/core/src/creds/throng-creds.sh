@@ -16,11 +16,25 @@
 
 set -uo pipefail
 
-CONFIG_FILE="${THRONG_CONFIG:-/run/throng/config.json}"
-CACHE_DIR="${THRONG_CREDS_CACHE:-/run/throng/cache}"
+# /dev/shm, not /run, and the reason is the uid this runs as. E2B's envd starts
+# the sandbox as uid 1000, while `docker run` honours the image's USER (root) —
+# so the same image runs under two different uids depending on the host. /run is
+# tmpfs owned root:root mode 0755, so `mkdir /run/throng` is EACCES for
+# everything E2B actually runs, and pre-creating it in the image cannot help
+# because /run is mounted fresh at boot.
+#
+# /dev/shm is tmpfs as well, so a credential still never lands on a persisted
+# filesystem, and it is mode 1777, so it needs neither root nor sudoers
+# membership. It behaves identically under `docker run` and under E2B, which is
+# the property /run turned out not to have. The directory itself is created 0700
+# and the config file 0600 (see creds/config.ts), so /dev/shm being
+# world-writable does not make the token readable; the sticky bit stops another
+# uid removing or renaming what we create there.
+CONFIG_FILE="${THRONG_CONFIG:-/dev/shm/throng/config.json}"
+CACHE_DIR="${THRONG_CREDS_CACHE:-/dev/shm/throng/cache}"
 SKEW=300              # serve_until = expires_at - SKEW
 # 10 years, for a literal github_token. Never expiring is safe because
-# /run/throng/config.json is written once when the sandbox is created and never
+# the config file is written once when the sandbox is created and never
 # again: a changed static token cannot appear in a running sandbox, so a cache
 # entry minted from it can never go stale relative to its source.
 STATIC_TTL=315360000
@@ -52,8 +66,9 @@ case "$LOCK_TICKS" in
     LOCK_TICKS=75 ;;
 esac
 
-# git_erase removes this directory whole, as root in production, and lock
-# directories live in it too — so a mis-set THRONG_CREDS_CACHE is an `rm -rf` on
+# git_erase removes this directory whole — as root under `docker run`, as uid
+# 1000 under E2B — and lock directories live in it too, so a mis-set
+# THRONG_CREDS_CACHE is an `rm -rf` on
 # whatever it names. `${CACHE_DIR:?}` only rejects empty/unset, never a
 # dangerous *value*; these checks reject the value. Nothing can make an
 # arbitrary path safe, but `/`, a bare top-level directory, and anything
@@ -77,9 +92,18 @@ check_cache_dir() {
     */.|*/..|*/./*|*/../*)
         die "THRONG_CREDS_CACHE must not contain '.' or '..', got '$CACHE_DIR_RAW'." ;;
   esac
-  # Two segments minimum: "/", "/cache" and "/tmp" are all refused, "/run/throng/cache" is not.
+  # Two segments minimum: "/", "/cache" and "/tmp" are all refused,
+  # "/dev/shm/throng/cache" — the default — is not.
   case "${CACHE_DIR%/*}" in
     ''|/) die "refusing '$CACHE_DIR_RAW' as the cache directory: too close to the filesystem root, and 'git credential erase' deletes it whole." ;;
+  esac
+  # /dev/shm passes the depth rule for free — its parent is /dev, not "/" — but
+  # it is a tmpfs mount shared with every other process in the sandbox, and it is
+  # now the parent of the default cache path. "Just point it at /dev/shm" is
+  # therefore the plausible mis-set that "/run" used to be, and the depth rule no
+  # longer catches it, so it is named here.
+  case "$CACHE_DIR" in
+    /dev/shm) die "refusing '$CACHE_DIR_RAW' as the cache directory: it is a tmpfs mount shared with the whole sandbox, and 'git credential erase' deletes it whole." ;;
   esac
 }
 
