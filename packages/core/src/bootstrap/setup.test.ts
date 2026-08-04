@@ -128,4 +128,25 @@ describe("token redaction", () => {
     expect(message).toContain("[REDACTED]");
     expect(message).not.toContain("ghs_0123456789abcdefghij");
   });
+
+  // Truncating before redacting slices a token that straddles the 2000-char
+  // boundary: the `ghs_` prefix falls outside the tail, so the pattern no longer
+  // matches and the token's SUFFIX is kept verbatim. Redacting first closes it.
+  it("redacts a token that straddles the truncation boundary", () => {
+    // 24 chars. Positioned so its last 10 land inside the tail and its prefix
+    // does not: 1990 trailing chars + 24 = the cut falls mid-token.
+    const token = "ghs_ABCDEFGHIJKLMNOPQRST";
+    const message = describeSetupFailure({
+      ok: false,
+      command: "noisy",
+      code: 1,
+      signal: null,
+      output: `${"x".repeat(3000)}${token}${"y".repeat(1990)}`,
+    });
+
+    expect(message).toMatch(/earlier chars omitted/); // truncation really happened
+    expect(message).not.toContain(token);
+    expect(message).not.toContain("KLMNOPQRST"); // nor the surviving tail of it
+    expect(message).toContain("[REDACTED]");
+  });
 });

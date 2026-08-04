@@ -82,7 +82,10 @@ export function describeSetupFailure(result: Extract<SetupResult, { ok: false }>
   const how = SIGNAL_EXITS[result.code]
     ? `exit ${result.code} — ${SIGNAL_EXITS[result.code]}`
     : `exit ${result.code}`;
-  const body = redactTokens(tail(result.output));
+  // Redact BEFORE truncating. The other order slices a token straddling the
+  // 2000-char boundary: the `gh?_` prefix falls outside the tail, so the pattern
+  // no longer matches and the token's suffix is kept verbatim.
+  const body = tail(redactTokens(result.output));
   const outputBlock = body ? `\n--- output (tail) ---\n${body}` : "\n(no output)";
   return `setup command failed: ${result.command} (${how})${outputBlock}`;
 }

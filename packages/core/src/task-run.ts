@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { GitResult } from "./bootstrap/git.js";
-import { describeSetupFailure, type SetupResult } from "./bootstrap/setup.js";
+import { describeSetupFailure, redactTokens, type SetupResult } from "./bootstrap/setup.js";
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
@@ -75,13 +75,18 @@ export class TaskRun {
       for (const repo of manifest.repos) {
         const dest = join(this.deps.workspaceRoot, repo.dest);
         log.info("cloning repo", { url: repo.url, ref: repo.ref, dest, primary: repo.primary });
+        // Clone and checkout run WITH credentials in place, and this message
+        // becomes the control plane's `instance.error_message` — the same sink
+        // describeSetupFailure redacts. git does not normally echo a
+        // helper-supplied password, but the sink is kept uniformly clean rather
+        // than relying on reasoning about what git might print.
         const cloned = await this.deps.clone(repo.url, dest);
         if (!cloned.ok) {
-          throw new StepError("cloning", `git clone failed for ${repo.dest} (exit ${cloned.code}): ${cloned.output.trim()}`);
+          throw new StepError("cloning", `git clone failed for ${repo.dest} (exit ${cloned.code}): ${redactTokens(cloned.output).trim()}`);
         }
         const checked = await this.deps.checkout(dest, repo.ref);
         if (!checked.ok) {
-          throw new StepError("cloning", `git checkout ${repo.ref} failed for ${repo.dest}: ${checked.output.trim()}`);
+          throw new StepError("cloning", `git checkout ${repo.ref} failed for ${repo.dest}: ${redactTokens(checked.output).trim()}`);
         }
         log.info("repo ready", { dest, ref: repo.ref });
         if (repo.primary) primaryDest = dest;

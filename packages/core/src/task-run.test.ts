@@ -122,6 +122,47 @@ describe("TaskRun credential ordering", () => {
     expect(d.clone).not.toHaveBeenCalled();
   });
 
+  // Clone and checkout run WITH credentials in place under the pull model, and
+  // their output lands verbatim in the control plane's instance.error_message —
+  // the same sink the setup path already redacts.
+  it("redacts tokens out of a clone failure message", async () => {
+    const d = deps({
+      clone: vi.fn(async () => ({
+        ok: false,
+        code: 128,
+        output: "fatal: could not read Username for 'https://ghs_0123456789abcdefghij@github.com'",
+      })),
+    });
+
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+
+    const status = tr.lifecycle.status();
+    expect(status.error?.step).toBe("cloning");
+    expect(status.error?.message).toContain("[REDACTED]");
+    expect(status.error?.message).not.toContain("ghs_0123456789abcdefghij");
+  });
+
+  it("redacts tokens out of a checkout failure message", async () => {
+    const d = deps({
+      checkout: vi.fn(async () => ({
+        ok: false,
+        code: 1,
+        output: "error: pathspec not found; remote was https://x-access-token:ghp_0123456789abcdefghij@github.com",
+      })),
+    });
+
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+
+    const status = tr.lifecycle.status();
+    expect(status.error?.step).toBe("cloning");
+    expect(status.error?.message).toContain("[REDACTED]");
+    expect(status.error?.message).not.toContain("ghp_0123456789abcdefghij");
+  });
+
   it("clones without a token argument", async () => {
     const d = deps();
     const tr = new TaskRun(d, { claude: adapter() });
