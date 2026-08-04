@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -601,4 +602,66 @@ describe("throng-creds single-flight", () => {
     for (const r of results) expect(r.stdout).toContain("password=ghs_shared");
     expect(stub.requests).toHaveLength(1);
   }, 30_000);
+
+  // `mkdir` fails for reasons other than contention, and waiting fixes none of
+  // them. Without that distinction this decline costs the full LOCK_TICKS —
+  // measured at 17s against the 0.02s asserted here.
+  it("declines promptly when the cache directory cannot be created", async () => {
+    const dir = sandbox();
+    // A regular file where a directory must go: `mkdir -p` fails with ENOTDIR
+    // even as root, which a merely nonexistent path would not.
+    writeFileSync(join(dir, "blocker"), "");
+
+    const started = Date.now();
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CREDS_CACHE: join(dir, "blocker", "cache") },
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 30_000);
+
+  it("gives up on a lock that never clears and mints anyway", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_waited", isoIn(3600)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+    const lock = join(dir, "cache", "git_github.com_acme_app.lock");
+    mkdirSync(lock, { recursive: true });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.stdout).toContain("password=ghs_waited");
+    expect(r.stderr).toContain("proceeding without the single-flight lock");
+    // A recent mtime is not proof of death, so the lock stays: it may belong to
+    // a process still working, and deleting it would let a third steal it.
+    expect(existsSync(lock)).toBe(true);
+  }, 60_000);
+
+  // The owner was SIGKILLed, so its EXIT trap never ran. Unreclaimed, every
+  // later miss on this key would pay the full wait and mint regardless — the
+  // whole stampede back, with 15s added to each participant.
+  it("reclaims a lock whose owner died, so the wait is paid once and not forever", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_reclaimed", isoIn(3600)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+    const entry = join(dir, "cache", "git_github.com_acme_app");
+    const lock = `${entry}.lock`;
+    mkdirSync(lock, { recursive: true });
+    const longAgo = new Date(Date.now() - 10 * 60_000);
+    utimesSync(lock, longAgo, longAgo);
+
+    const first = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(first.stdout).toContain("password=ghs_reclaimed");
+    expect(existsSync(lock)).toBe(false); // broken, held, then released
+
+    rmSync(entry); // force a second miss on the same key
+    const started = Date.now();
+    const second = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(second.stdout).toContain("password=ghs_reclaimed");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 60_000);
 });

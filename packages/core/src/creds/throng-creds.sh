@@ -25,6 +25,7 @@ SKEW=300              # serve_until = expires_at - SKEW
 # entry minted from it can never go stale relative to its source.
 STATIC_TTL=315360000
 LOCK_TICKS=75         # × 0.2s = 15s before giving up on the lock
+LOCK_STALE_MIN=2      # a live holder is bounded by curl's --max-time/--retry-max-time
 
 warn() { printf 'throng-creds: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
@@ -36,24 +37,30 @@ now()  { date +%s; }
 # dangerous *value*; these checks reject the value. Nothing can make an
 # arbitrary path safe, but `/`, a bare top-level directory, and anything
 # reachable by traversal are the ones that end a machine.
-CACHE_DIR_RAW="$CACHE_DIR"          # only ever used to quote back what was set
-# Trailing slashes go first: "/cache/" has the same parent as "/run/cache" and
-# would otherwise walk straight past the depth check below.
-while [ "$CACHE_DIR" != "/" ] && [ "$CACHE_DIR" != "${CACHE_DIR%/}" ]; do
-  CACHE_DIR="${CACHE_DIR%/}"
-done
-case "$CACHE_DIR" in
-  /*) ;;
-  *)  die "THRONG_CREDS_CACHE must be an absolute path, got '$CACHE_DIR_RAW'." ;;
-esac
-case "$CACHE_DIR" in
-  */.|*/..|*/./*|*/../*)
-      die "THRONG_CREDS_CACHE must not contain '.' or '..', got '$CACHE_DIR_RAW'." ;;
-esac
-# Two segments minimum: "/", "/cache" and "/tmp" are all refused, "/run/throng/cache" is not.
-case "${CACHE_DIR%/*}" in
-  ''|/) die "refusing '$CACHE_DIR_RAW' as the cache directory: too close to the filesystem root, and 'git credential erase' deletes it whole." ;;
-esac
+#
+# Called from the modes that touch the cache rather than at startup. `git store`
+# must exit 0 whatever the environment says: git's protocol gives it no way to
+# report a failure, and it reads and writes nothing here.
+check_cache_dir() {
+  CACHE_DIR_RAW="$CACHE_DIR"        # quote back what was set, not the normalised form
+  # Trailing slashes go first: "/cache/" has the same parent as "/run/cache" and
+  # would otherwise walk straight past the depth check below.
+  while [ "$CACHE_DIR" != "/" ] && [ "$CACHE_DIR" != "${CACHE_DIR%/}" ]; do
+    CACHE_DIR="${CACHE_DIR%/}"
+  done
+  case "$CACHE_DIR" in
+    /*) ;;
+    *)  die "THRONG_CREDS_CACHE must be an absolute path, got '$CACHE_DIR_RAW'." ;;
+  esac
+  case "$CACHE_DIR" in
+    */.|*/..|*/./*|*/../*)
+        die "THRONG_CREDS_CACHE must not contain '.' or '..', got '$CACHE_DIR_RAW'." ;;
+  esac
+  # Two segments minimum: "/", "/cache" and "/tmp" are all refused, "/run/throng/cache" is not.
+  case "${CACHE_DIR%/*}" in
+    ''|/) die "refusing '$CACHE_DIR_RAW' as the cache directory: too close to the filesystem root, and 'git credential erase' deletes it whole." ;;
+  esac
+}
 
 # REPLY <- the cache file for a canonical key. Sanitising can collide
 # ("acme/app" and "acme_app" both become "acme_app"), which is why every entry
@@ -99,16 +106,24 @@ write_cache() { # $1=key $2=serve_until $3=username $4=token $5=password_expiry
   mv -f "$tmp" "$file"
 }
 
-# Single-flight. `mkdir` is atomic on every POSIX filesystem, needs no
-# util-linux (flock is absent on macOS, where these tests run), and has no
-# stale-lock case to reason about because the wait is bounded: after LOCK_TICKS
-# we proceed anyway. A duplicate API call is a far better outcome than a git
-# operation that stalls behind a lock whose owner died.
+# Single-flight. `mkdir` is atomic on every POSIX filesystem and needs no
+# util-linux (flock is absent on macOS, where these tests run). The cost of
+# mkdir is that the lock outlives an owner that cannot run its EXIT trap —
+# SIGKILL and the OOM killer — so this waits, then reclaims, then proceeds
+# regardless. Waiting alone is not enough: a leaked lock that is never reclaimed
+# makes every later miss on that key wait the full LOCK_TICKS and mint anyway,
+# which is the whole stampede plus 15s a head — strictly worse than no lock.
+# A duplicate API call is a far better outcome than either.
 LOCK_DIR=""
 acquire_lock() { # $1 = canonical key
-  local lock ticks=0
+  local lock ticks=0 broke=0
   cache_file "$1"; lock="$REPLY.lock"
   mkdir -p "$CACHE_DIR" 2>/dev/null
+  # Armed before the lock is taken, not after: a signal in the window between
+  # the winning mkdir and the trap would otherwise leak the lock. Arming early
+  # is a no-op on every path that bails, because release_lock does nothing until
+  # LOCK_DIR names a directory this process created.
+  trap 'release_lock' EXIT
   while ! mkdir "$lock" 2>/dev/null; do
     # mkdir also fails for reasons waiting cannot fix — an unwritable or
     # uncreatable cache directory. Only an existing lock means another process
@@ -116,6 +131,23 @@ acquire_lock() { # $1 = canonical key
     # credential lookup would stall the full 15s before declining.
     [ -d "$lock" ] || return 0
     if [ "$ticks" -ge "$LOCK_TICKS" ]; then
+      # A live holder cannot outlast curl's own ceiling (--max-time 10,
+      # --retry-max-time 20), so a lock this process has already watched go
+      # nowhere for LOCK_TICKS *and* whose mtime is minutes old belongs to an
+      # owner that was killed. Staleness is established two independent ways
+      # rather than by mtime alone. `find -maxdepth 0 -mmin` reads the same on
+      # BSD and GNU, unlike stat's -c/-f split; `broke` caps the total wait at
+      # 2 × LOCK_TICKS and tries the break exactly once, so a lock that cannot
+      # be removed cannot spin.
+      #
+      # Residual race, accepted: two waiters can both time out, both read an old
+      # mtime, and both rmdir, so one deletes a lock the other has just created.
+      # The window is sub-millisecond and unavoidable with mkdir, and its worst
+      # case is two mints — exactly the status quo it replaces, with
+      # write_cache's `mv -f` keeping the entry itself atomic.
+      if [ "$broke" -eq 0 ] && [ -n "$(find "$lock" -maxdepth 0 -mmin "+$LOCK_STALE_MIN" 2>/dev/null)" ]; then
+        broke=1; ticks=0; rmdir "$lock" 2>/dev/null; continue
+      fi
       warn "proceeding without the single-flight lock"
       return 0
     fi
@@ -123,7 +155,6 @@ acquire_lock() { # $1 = canonical key
     ticks=$((ticks + 1))
   done
   LOCK_DIR="$lock"
-  trap 'release_lock' EXIT
 }
 
 release_lock() {
@@ -300,15 +331,24 @@ git_get() {
   repo="${path#/}"
   repo="${repo%.git}"
 
+  check_cache_dir
   credential "git|$host|$repo" git "$host" "$repo" || exit 0
   printf 'quit=1\n'
 }
 
 git_erase() {
   cat >/dev/null
+  check_cache_dir
   # Git calls erase after a 401. Drop the whole directory rather than globbing:
   # lock directories live here too, and a partial clear would leave a rejected
   # token in play for some other key.
+  #
+  # That includes the lock directories of processes still running, so an erase
+  # concurrent with a mint can hand the same lock path to a third process while
+  # the first still believes it holds it, and the first's release_lock then
+  # removes the third's lock. It costs a duplicate API call, never a corrupt
+  # entry, and it needs a 401 to land mid-mint; erasing a rejected token
+  # promptly is worth more than that.
   rm -rf "${CACHE_DIR:?}"
   return 0
 }
@@ -317,13 +357,15 @@ git_erase() {
 # resolves against the task's default scope.
 gh_token() {
   local out line
+  check_cache_dir
   out=$(credential "api|github.com|" api "github.com" "") || exit 0
   while IFS= read -r line; do
     case "$line" in
       password=*) printf '%s\n' "${line#password=}"; return 0 ;;
     esac
-  # A here-string, not a here-doc: a here-doc ends at a line that is literally
-  # its delimiter, and $out is server-derived.
+  # A here-string rather than the three-line here-doc this replaced: same
+  # behaviour (a here-doc delimiter is matched against the script source at
+  # parse time, never against expanded content), one line instead of three.
   done <<<"$out"
   return 0
 }
