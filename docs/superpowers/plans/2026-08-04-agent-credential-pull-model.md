@@ -976,7 +976,12 @@ fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
   body="${resp%
 *}"
 
-  scope="${4:-the task's default scope}"
+  # NOT `scope="${4:-the task's default scope}"` — bash honours a single quote
+  # inside ${...} even within double quotes, so the apostrophe in "task's" opens
+  # a string that never closes and the whole script fails to parse. Verified
+  # under both 3.2.57 and 5.3.9.
+  scope="$4"
+  [ -n "$scope" ] || scope="the task's default scope"
   case "$status" in
     200) ;;
     401) die "task identity rejected — this task may have been revoked or completed." ;;
