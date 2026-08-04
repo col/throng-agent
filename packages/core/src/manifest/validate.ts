@@ -1,6 +1,7 @@
 import type { Env } from "../env.js";
 import type { AdapterRegistry, EngineAdapter } from "../engine/adapter.js";
-import type { BaseManifest, FieldError, Manifest, RepoSpec, ValidateResult } from "./types.js";
+import { log } from "../log.js";
+import type { BaseManifest, CredentialsConfig, FieldError, Manifest, RepoSpec, ValidateResult } from "./types.js";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -50,6 +51,8 @@ export function validate(
   if ("github_token" in input && typeof input.github_token !== "string") {
     errors.push({ field: "github_token", reason: "must be a string" });
   }
+
+  validateCredentials(input.credentials, errors);
 
   validateUserIdentity(input.user_identity, errors);
 
@@ -123,8 +126,12 @@ function validateRepos(value: unknown, errors: FieldError[]): void {
     if (typeof repo.primary !== "boolean") {
       errors.push({ field: `repos[${i}].primary`, reason: "must be a boolean" });
     }
-    if ("token" in repo && typeof repo.token !== "string") {
-      errors.push({ field: `repos[${i}].token`, reason: "must be a string" });
+    // Retired by the pull model: throng-creds scopes per repo through
+    // credential.useHttpPath, so a static per-repo token is a second, weaker
+    // mechanism for something the helper already does properly. Still ACCEPTED
+    // so an unchanged control plane does not start receiving 400s.
+    if ("token" in repo) {
+      log.warn("repos[].token is ignored; credentials are fetched per operation", { repo: i });
     }
   });
 }
@@ -148,6 +155,38 @@ function validateUserIdentity(value: unknown, errors: FieldError[]): void {
   }
 }
 
+/**
+ * The optional `credentials` block. Omitted entirely in standalone mode, where a
+ * literal `github_token` is used instead. Both fields are required when the
+ * block is present — a half-configured helper would fail at the first clone
+ * rather than at initialise, which is much harder to diagnose.
+ */
+function validateCredentials(value: unknown, errors: FieldError[]): void {
+  if (value === undefined) return;
+  if (!isObject(value)) {
+    errors.push({ field: "credentials", reason: "must be an object" });
+    return;
+  }
+  const url = value.url;
+  if (typeof url !== "string" || url.trim() === "") {
+    errors.push({ field: "credentials.url", reason: "must be a non-empty string" });
+  } else if (!url.startsWith("https://")) {
+    // Same requirement as repos[].url: this endpoint hands back live GitHub
+    // and control-plane tokens, so it is never appropriate to send in the clear.
+    errors.push({ field: "credentials.url", reason: "must start with https://" });
+  } else if (url.endsWith("/")) {
+    // throng-creds concatenates this raw into "$url/v1/credentials/github". A
+    // trailing slash silently produces a double slash, which most servers 404
+    // on rather than reject outright — the helper would then report a
+    // confusing runtime error at the first clone. Rejecting here, where the
+    // operator gets a precise field error, is cheaper than normalising and
+    // hoping the resulting URL still matches what the control plane expects.
+    errors.push({ field: "credentials.url", reason: "must not end with a trailing slash" });
+  }
+  const tokenReason = nonEmptyString(value.token);
+  if (tokenReason) errors.push({ field: "credentials.token", reason: tokenReason });
+}
+
 function buildManifest(
   input: Record<string, unknown>,
   repos: Array<Record<string, unknown>>,
@@ -155,20 +194,23 @@ function buildManifest(
   agent: unknown,
   env: Env,
 ): Manifest {
-  const defaultToken = blankToNil(input.github_token) ?? blankToNil(env.GITHUB_TOKEN);
   const specs: RepoSpec[] = repos.map((r) => ({
     url: r.url as string,
     ref: r.ref as string,
     dest: r.dest as string,
     primary: r.primary as boolean,
-    token: blankToNil(r.token) ?? defaultToken,
   }));
   // A blank name/email is treated as absent, the same way a blank token is: git
   // rejects an empty ident, so passing one through would only fail later.
   const identity = isObject(input.user_identity) ? input.user_identity : {};
+  const creds = isObject(input.credentials) ? input.credentials : null;
+  const credentials: CredentialsConfig | null = creds
+    ? { url: creds.url as string, token: creds.token as string }
+    : null;
   const base: BaseManifest = {
     repos: specs,
-    github_token: defaultToken,
+    credentials,
+    github_token: blankToNil(input.github_token) ?? blankToNil(env.GITHUB_TOKEN),
     user_identity: { name: blankToNil(identity.name), email: blankToNil(identity.email) },
     setup_commands: (input.setup_commands as string[] | undefined) ?? [],
   };
