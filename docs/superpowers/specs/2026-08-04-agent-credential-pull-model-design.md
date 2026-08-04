@@ -72,7 +72,7 @@ the single unit of promotion that `template.ts` already depends on.
 | Path | What it is |
 |---|---|
 | `/usr/local/bin/throng-creds` | the helper, entirely in bash |
-| `/usr/local/bin/gh` | bash shim → `exec env GH_TOKEN="$(throng-creds gh)" gh.real "$@"` |
+| `/usr/local/bin/gh` | bash shim → `exec env GH_TOKEN="$(throng-creds gh)" gh.real "$@"`, or `exec env -u GH_TOKEN gh.real "$@"` when the helper declines |
 | `/usr/local/bin/gh.real` | the real `gh` binary — the Dockerfile's existing `install` target, renamed |
 
 Because the Dockerfile owns both `gh` names, the PATH-ordering hazard is
@@ -81,8 +81,16 @@ designed out rather than verified: nothing else installs a `gh` into this image.
 Both scripts use `#!/bin/bash`, not `#!/bin/sh` — Debian's `sh` is dash, which
 lacks the parameter expansion the fast path relies on.
 
-The Dockerfile gains `curl` and `jq` (~5MB). `flock` is already present via
-`util-linux`.
+The Dockerfile gains `curl` and `jq` (~5MB), and nothing else: single-flight uses
+`mkdir`, so no `flock` and no `util-linux` dependency.
+
+Two build-time smoke checks follow the install, so a broken helper fails the
+build rather than the first clone: `throng-creds git store </dev/null` proves
+the script parses and exits 0, and `gh --version` proves the shim resolves
+`gh.real` and declines cleanly with no config present. The second reaches the
+cache path and so creates `/run/throng`; a following `rm -rf /run/throng` keeps
+that build-time side effect out of the shipped image, which must start with
+nothing configured.
 
 ### Git configuration
 
@@ -120,7 +128,9 @@ The credential write moves to the very front because cloning now depends on it.
 `deps.clone()` loses its `token` parameter and its askpass environment.
 `askpass.sh`, the `ASKPASS` export and `injectGitCredentials()` are deleted.
 `injectGitIdentity()` is untouched — commit identity was always a separate
-concern from which token pushes the work, and stays environment-based.
+concern from which token pushes the work, and stays environment-based. With the
+credential half gone, `bootstrap/git-credentials.ts` is left holding only that
+function and is renamed `bootstrap/git-identity.ts` to match.
 
 If writing the config file fails, boot fails immediately with a new
 `credentials` step, before any clone is attempted. A clone that fails on auth
@@ -142,7 +152,14 @@ It does invalidate the assumption recorded in `setup.ts` ("Setup runs before any
 credential injection, so the output cannot contain the manifest's tokens").
 Setup command output is captured verbatim into the control plane's
 `instance.error_message`, so `describeSetupFailure` gains a redaction pass over
-`ghs_`, `ghp_`, `gho_` and `ghu_` prefixed strings.
+`ghp_`, `gho_`, `ghu_`, `ghs_` and `ghr_` prefixed strings — applied before the
+output is truncated to its tail, so a token straddling the cut cannot survive in
+halves, and applied to the full output that is logged as well as to the message.
+
+The same redaction is applied to clone and checkout output, which now also runs
+with credentials in place and lands in the same sink. git does not normally echo
+a helper-supplied password, but the sink is kept uniformly clean rather than
+resting on reasoning about what git might print.
 
 ## `throng-creds`
 
@@ -161,30 +178,51 @@ hundred lines of linear work. A spawn-and-assert test harness was needed for the
 bash side either way, and extending it with a stub HTTP server costs about what
 injecting a fake fetch into a Node CLI would have.
 
-Two things then actively favour bash:
+One thing then actively favours bash:
 
-- **`flock` is a real syscall wrapper**, one line. Node has no binding for it,
-  so single-flight would be a hand-rolled `O_CREAT|O_EXCL` lockfile with backoff
-  and a staleness break — and the staleness break is precisely what misbehaves
-  under contention.
 - **`curl --retry 2` already covers transient retry**, including 5xx and
   connection-refused, so retry and backoff logic stops needing to exist.
 
+An earlier version of this section claimed a second: that `flock` is a one-line
+syscall wrapper in bash and has no Node binding, so Node would have to hand-roll
+a lockfile with a staleness break, which is the part that misbehaves under
+contention. That argument does not survive. `flock` is util-linux only and
+absent on macOS, where this repo's tests run locally, and a lock that can only
+be exercised in CI is a lock whose regressions are found late — so an atomic
+`mkdir` on a lock directory was taken instead, which bash and Node can both do.
+That means the hand-rolled staleness break exists after all. It is bounded, and
+its residual race is stated and accepted under "Single-flight" below.
+
 What this gives up is type safety on the resolution path and stringier error
-message construction. Two things need care in review: splitting status from body
-via `-w '\n%{http_code}'` is brittle when a response has no trailing newline,
-and `set -euo pipefail` interacts badly with the `read` loop that parses stdin.
+message construction. Two things needed care in review: splitting status from
+body via `-w '\n%{http_code}'` is brittle when a response has no trailing
+newline, and `set -euo pipefail` interacts badly with the `read` loop that parses
+stdin. Both landed as expected — status and body are split on the *last*
+newline with a `${resp##*…}` / `${resp%…*}` pair, which stays correct for an
+empty or newline-free body because `-w` always appends one; and the script runs
+`set -uo pipefail` with no `-e`, because a credential helper must decide for
+itself what is a decline and what is fatal.
 
 If the resolution logic ever grows — multiple hosts, per-repo policy, GHES, a
 token map — moving it to Node is a contained rewrite of one file, with the test
 suite already in place.
 
+The script is written to bash 3.2, not bash 5. The image runs 5.2, but the suite
+spawns `bash` and macOS ships 3.2 — so no `mapfile`, no `exec {fd}>`, no
+`printf '%(%s)T'`, no associative arrays. Note this is a portability choice with
+no production consumer: the image's bash is 5.2, so the constraint exists only
+so the suite runs on any developer machine. Because `bash` on PATH may be a
+newer Homebrew build, verifying it requires explicitly running against
+`/bin/bash`.
+
 ### Fast path and slow path
 
 The two tiers survive the merge, as paths within one script rather than a
 language boundary. A cache hit must be fast, because git invokes the helper on
-every remote operation; it must therefore fork nothing — no `jq`, no `date -d`,
-no `sha256sum`. The cache format is designed to make that possible.
+every remote operation; it must therefore fork at most once. The one fork is
+`date +%s`; the fork-free `printf '%(%s)T'` needs bash 4.2 and macOS ships bash
+3.2, which the test suite runs against. No `jq`, no `date -d`, no `sha256sum`,
+no expiry arithmetic. The cache format is designed to make that possible.
 
 ### Cache format
 
@@ -209,8 +247,8 @@ the fast path string-compares line 2 against the key it wants. A mismatch falls
 through to the slow path, which rewrites the entry. Cheaper than hashing, and
 correct.
 
-A cache hit is therefore: one `read`, one integer compare, one string compare,
-one `tail`.
+A cache hit is therefore: `read`s in the shell, one integer compare, one string
+compare, and the single `date +%s` fork. No `tail`, no `jq`.
 
 The slow path writes via a temp file and `mv` within the same directory, so the
 fast path can never observe a half-written file.
@@ -232,7 +270,19 @@ fast path can never observe a half-written file.
 
 `erase` drains stdin, removes the cache and exits 0. Git calls this after a 401,
 so the next operation re-mints rather than replaying a token GitHub has already
-rejected. It never touches the slow path.
+rejected. It never touches the slow path. It removes the cache *directory* whole
+rather than globbing its entries: lock directories live there too, and a partial
+clear would leave a rejected token in play under some other key. The cost is
+that an erase concurrent with a mint can delete a live lock, which costs a
+duplicate API call and never a corrupt entry.
+
+Because `erase` is an `rm -rf` of whatever `THRONG_CREDS_CACHE` names, the modes
+that touch the cache first check it: absolute, no `.` or `..` segment, and at
+least two path segments, so `/`, `/tmp` and any bare top-level directory are
+refused. `${CACHE_DIR:?}` alone would only have caught empty or unset. `git
+store` deliberately skips the check — git's protocol gives it no way to report a
+failure and it reads and writes nothing — which is also what makes it usable as
+the Dockerfile's build-time smoke check.
 
 `gh` mode resolves `api|github.com|` and prints the bare token. The shim cannot
 know which repo a given `gh` command targets, so `gh` always resolves against the
@@ -263,9 +313,39 @@ question.
 Required despite the fast path: N parallel git operations at boot all miss
 simultaneously, and GitHub rate-limits installation-token creation hard.
 
-`flock` on a per-key lock file, then **re-check the cache under the lock** — the
-process that blocked will find the entry the winner just wrote, and must not
-fetch again.
+An atomic `mkdir` on a per-key lock directory, then **re-check the cache under
+the lock** — the process that blocked will find the entry the winner just wrote,
+and must not fetch again. The wait is bounded (`LOCK_TICKS`, default 75 × 0.2s =
+15s, overridable via `THRONG_CREDS_LOCK_TICKS` for tests); after it, the caller
+proceeds *without* the lock, because a duplicate API call is a better outcome
+than a git operation stalled behind a dead owner.
+
+`mkdir` rather than `flock`: `flock` is util-linux and absent on macOS, where
+this repo's tests run locally, and a lock that can only be exercised in CI is a
+lock whose regressions are found late.
+
+A lock whose owner was `SIGKILL`ed (the OOM killer is the likely cause in a
+memory-capped sandbox) is reclaimed: after a full `LOCK_TICKS` of observed no
+progress, a lock whose mtime is older than `LOCK_STALE_MIN` is removed and the
+wait restarts once. Without this, an orphaned lock is strictly worse than no
+lock at all — every waiter still times out and still mints, so the full stampede
+returns, plus 15s of latency each, plus a warning on the agent's stderr, and it
+recurs indefinitely because the only other recovery is a `git credential erase`
+that requires a 401 which may never come. A live holder cannot outlast curl's
+own ceiling, so anything older is provably stale.
+
+The residual race is that two waiters can both time out, both judge the lock
+stale, and both remove it — so one deletes the other's fresh lock. The window is
+sub-millisecond and no `mkdir`-based break can eliminate it. It is accepted
+because its worst case equals the status quo it replaces: two mints instead of
+one, with `write_cache`'s atomic rename meaning no corruption either way.
+
+`THRONG_CREDS_LOCK_TICKS` is validated rather than trusted. A non-numeric or
+absurdly large value would make the per-tick comparison error every iteration,
+so the timeout branch would never be reached and the helper would wait forever —
+the worst failure a credential helper has, since it stalls the git operation
+that called it. Anything that is not one to five digits falls back to the
+default with a warning.
 
 ### Error messages
 
@@ -281,8 +361,18 @@ are written as such:
 - **429 / 5xx / network**, after two retries with backoff — states that the
   credential service is temporarily unreachable and that the *same* command
   should be retried.
+- **any other status** — a 404 from a mistyped `credentials.url` or an API
+  version bump is the likeliest — says explicitly that this is a configuration
+  or protocol error and that retrying will not help. Describing it as transient
+  would send the agent into a retry loop that can never succeed.
 
 Only transient classes retry. A 4xx returns immediately.
+
+Retry is `curl --retry 2` bounded by both `--max-time 10` and
+`--retry-max-time 20`. The second is not optional: `--max-time` bounds each
+transfer but not the sleeps between attempts, and curl obeys `Retry-After` when
+retrying, so a routine `Retry-After: 60` would otherwise stall a git fetch for
+minutes with no output at all.
 
 The 403 wording matters because an agent that cannot distinguish "not allowed"
 from "auth failed, retry" may work around the first by doing something worse:
@@ -294,6 +384,13 @@ If `throng-creds gh` yields nothing — declined, or failed — the shim `exec`s
 `gh.real` **without setting `GH_TOKEN` at all**, rather than setting it to the
 empty string. `gh` then produces its own idiomatic "not logged in" error instead
 of a confusing auth rejection. The helper's stderr has already been printed.
+
+That path is `exec env -u GH_TOKEN gh.real "$@"`, not a bare `exec`: not setting
+`GH_TOKEN` is not the same as it being absent. Anything that exported one into
+the shim's environment — a leftover boot-time injection, a developer's shell —
+would otherwise be inherited, and a stale token would silently win on precisely
+the path documented to produce a clean "not logged in". `env -u` is in both GNU
+coreutils and macOS.
 
 ## Manifest
 
@@ -312,8 +409,17 @@ what makes a bare `docker run` work.
 }
 ```
 
-`credentials` must be an object with non-blank string `url` and `token`. Errors
-are reported as `credentials.url` and `credentials.token`, matching the existing
+`credentials` must be an object with non-blank string `url` and `token`. Both
+fields are required when the block is present: a half-configured helper would
+fail at the first clone rather than at initialise, which is much harder to
+diagnose. `url` must additionally start with `https://` — the endpoint hands
+back live GitHub and control-plane tokens, so it is never appropriate in the
+clear — and must not end in a trailing slash, because `throng-creds`
+concatenates it raw into `"$url/v1/credentials/github"` and the resulting double
+slash 404s on most servers rather than being rejected outright. Rejecting at
+initialise, where the operator gets a precise field error, beats normalising and
+hoping the result still matches what the control plane serves. Errors are
+reported as `credentials.url` and `credentials.token`, matching the existing
 `FieldError` convention.
 
 ### `repos[].token` is retired
@@ -328,8 +434,8 @@ every request names its repo and the server narrows the token to it — which is
 strictly better than a static per-repo token.
 
 `repos[].token` is therefore still **accepted** (so an unchanged control plane
-does not begin receiving 400s) but ignored, with a single `log.warn` naming the
-repo. `RepoSpec` loses its `token` field; `BaseManifest` gains
+does not begin receiving 400s) but ignored, with a single `log.warn` carrying
+the repo's index. `RepoSpec` loses its `token` field; `BaseManifest` gains
 `credentials: CredentialsConfig | null`.
 
 ### Config file
@@ -384,7 +490,11 @@ Idempotency-Key: <uuid>
 
 - **`expires_at` is mandatory.** The client cannot cache without it, and without
   caching the installation-token creation limit is exhausted. It also populates
-  git's `password_expiry_utc`.
+  git's `password_expiry_utc`. It must be ISO-8601 with a `Z` suffix, and it
+  must be more than the 300s skew away: a token expiring sooner would be written
+  with `serve_until` already in the past, so the helper would decline with no
+  output on the very entry it just minted. The client rejects that case loudly
+  instead, naming the clock as a suspect.
 - **Scope per request, not per session.** A multi-repo task gets one token per
   repo, not one token spanning all of them.
 - **`purpose` selects the permission set.** `git` needs `contents:write`; `api`
@@ -448,6 +558,13 @@ producing exactly one upstream request.
 That last case is the one to write first — it is the only test that would catch
 a lock regression, and a stampede is silent until GitHub starts rate-limiting.
 
+Everything the suite needs to redirect is an environment variable with a
+production-correct default, so nothing is installed and no path is stubbed in
+the script itself: `THRONG_CONFIG` and `THRONG_CREDS_CACHE` for the two file
+locations, `THRONG_CREDS_LOCK_TICKS` to shorten the 15s lock wait, and
+`THRONG_CREDS_BIN` / `GH_REAL_BIN` so the `gh` shim can be pointed at the
+checked-out script and a fake `gh`.
+
 **Integration:** extend `throng-agent/src/integration/boot.test.ts` for the
 reordered boot and the config write.
 
@@ -462,14 +579,18 @@ repeatable procedure in the README.
 
 ## To verify during implementation
 
-`/run` is tmpfs and the image sets no `USER`, so both the runtime and the
-agent's shells should run as root, making mode `0600` correct and the uid
-concern moot. This must be confirmed against a live E2B sandbox — including that
-tmpfs contents survive pause and resume — before the design relies on it.
+**Settled.** The image sets no `USER` and runs as uid 0, confirmed against a
+real container build. Mode `0600` on `/run/throng/config.json` inside
+`/run/throng` at `0700` is therefore correct, and the uid concern is moot: the
+same root uid runs the runtime, `git`, `gh` and the agent's shells. The `0711` /
+`0644` fallback contemplated here is not needed and was not implemented.
 
-If the agent turns out to run as a different uid, the fallback is `/run/throng`
-at `0711` with the file at `0644`: readable by the agent, still not listable.
-`/run/throng/cache` must be writable by whichever uid runs `git` and `gh`.
+**Still open.** That `/run` is tmpfs in a live E2B sandbox, and that its
+contents survive pause and resume. Neither has been confirmed against a running
+sandbox. If the cache does not survive a resume the design still works — the
+next operation takes the slow path and re-mints — but if `/run/throng/config.json`
+does not survive, the sandbox loses its identity token with no way to be handed
+another, since the file is write-once (see "Identity token lifetime").
 
 ## Out of scope
 

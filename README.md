@@ -13,7 +13,7 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
 `POST /api/initialise` takes a JSON manifest that specifies:
 - A list of repositories the agent can access
 - A list of setup commands to configure the environment
-- A GitHub token for the agent to checkout repos, raise PRs etc.
+- Credentials: either a control-plane endpoint to fetch short-lived GitHub tokens from, or a static token
 - Agent configuration:
   - Platform type (claude, codex, etc.)
   - Platform API Key
@@ -28,8 +28,12 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
     { "url": "https://github.com/acme/app", "ref": "main", "dest": "app", "primary": true }
   ],
   "setup_commands": ["npm install"],
-  "github_token": "ghp_…",     // top-level; clones repos and authenticates `gh`
-  "user_identity": {           // optional — the identity commits are made under
+  "credentials": {                    // pull mode: where to fetch GitHub tokens
+    "url": "https://control-plane.example",
+    "token": "…"                      // task-scoped identity
+  },
+  "github_token": "ghp_…",            // static; wins over `credentials`
+  "user_identity": {                  // optional — the identity commits are made under
     "name": "Throng Bot",
     "email": "bot@throng.dev"
   },
@@ -58,23 +62,56 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
 - **`effort`** is optional and sets the reasoning effort level: one of
   `low`, `medium`, `high`, `xhigh`, `max`.
 
-### `github_token` and `user_identity`
+### `credentials`, `github_token` and `user_identity`
 
-- **`github_token`** clones the repos and authenticates the `gh` CLI (exported as
-  `GH_TOKEN`). It falls back to the `GITHUB_TOKEN` env var, and a blank string
-  counts as absent. A repo entry's own `token` still wins for that repo.
+- **`credentials`** is how the agent gets GitHub tokens in production. `git` uses
+  a credential helper and `gh` is wrapped by a shim; both call `throng-creds`,
+  which POSTs to `<url>/v1/credentials/github` with `token` as its bearer
+  identity and gets back a short-lived, repo-scoped installation token. Nothing
+  is cached beyond its expiry, and no GitHub credential is ever placed in the
+  process environment — an environment is fixed at `execve()`, so a token put
+  there at boot could never be refreshed, which is what broke long-running and
+  paused tasks. `url` must start with `https://` and must not end in a trailing
+  slash (the helper appends the path to it verbatim); both are rejected at
+  validation as `credentials.url`.
+- **`github_token`** is a literal token, and **takes precedence over
+  `credentials`** when both are present. It exists so the image can be run
+  standalone, without the Throng platform. It is honoured inside `throng-creds`
+  rather than by a separate code path, so a standalone run exercises the same
+  wiring production uses. It falls back to the `GITHUB_TOKEN` env var, and a
+  blank string counts as absent.
 - **`user_identity`** is optional, as are both of its fields. `name` and `email`
-  become the commit identity, exported as `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}` for
-  every command the agent runs. Without an identity from some source git refuses to
-  commit at all ("Author identity unknown"), and an agent will improvise one.
-  The field names mirror git's own `[user]` config section, which is what they
-  become — `name` rather than `username` deliberately, since in GitHub's vocabulary
-  a username is the account handle (`octocat`), not a display name.
+  become the commit identity, exported as `GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL}`
+  for every command the agent runs. Without an identity from some source git
+  refuses to commit at all ("Author identity unknown"), and an agent will
+  improvise one. The field names mirror git's own `[user]` config section —
+  `name` rather than `username` deliberately, since in GitHub's vocabulary a
+  username is the account handle (`octocat`), not a display name.
 
-The two are independent: a commit identity is a git concept, unrelated to which
-token pushes the work, so a manifest may carry either, both, or neither. Nothing is
-written to `~/.gitconfig` — the identity, the git credential helper and `GH_TOKEN`
-all live in the process environment for the life of the sandbox.
+Credentials and identity are independent: a commit identity is a git concept,
+unrelated to which token pushes the work, so a manifest may carry either, both,
+or neither.
+
+`repos[].token` is still accepted but ignored. `throng-creds` scopes every
+request to the repo git is talking to, which a static per-repo token cannot.
+
+### Running standalone
+
+```bash
+docker run -d -p 8080:8080 -p 3030:3030 --name throng-agent ghcr.io/col/throng-agent:latest
+
+curl -X POST localhost:8080/api/initialise -H 'content-type: application/json' -d '{
+  "repos": [{"url":"https://github.com/acme/app","ref":"main","dest":"app","primary":true}],
+  "github_token": "ghp_…",
+  "agent": {"platform":"claude","api_key":"sk-…"}
+}'
+```
+
+Then confirm the credential wiring end to end:
+
+```bash
+docker exec throng-agent bash -lc 'cd /workspace/app && git fetch && gh auth status'
+```
 
 ## What's in the box?
 
@@ -84,7 +121,7 @@ This repo mostly just provides the initialise API and a thin layer over the agen
 
 | Path                    | Package                | Role |
 | ----------------------- | ---------------------- | ---- |
-| `packages/core`         | `@throng/agent-core`   | Shared init/manifest/control-API runtime. Owns the lifecycle state machine, the control HTTP API, git/setup bootstrap, generic manifest validation, boot orchestration, and the process entrypoint. Published to npm (public). |
+| `packages/core`         | `@throng/agent-core`   | Shared init/manifest/control-API runtime. Owns the lifecycle state machine, the control HTTP API, git/setup bootstrap, generic manifest validation, boot orchestration, the process entrypoint, and the `throng-creds` credential helper and `gh` shim (`src/creds/*.sh`) that the image installs. Published to npm (public). |
 | `throng-agent`          | `throng-agent`         | The deployable all-in-one image. Wires every engine adapter into a registry and selects one per-`initialise` via `agent.platform`. Owns the single Dockerfile; runtime `CMD` runs `throng-agent/dist/index.js`. |
 | `throng-agent-claude`   | `throng-agent-claude`  | Claude Code adapter **library** over [`@col/a2a-claude`](https://github.com/col/a2a-wrapper) — a temporary fork of `a2a-claude`. Exports `ClaudeEngineAdapter`; consumed by the `throng-agent` app. |
 | `throng-agent-codex`    | `throng-agent-codex`   | Codex adapter **library** over the upstream [`a2a-codex`](https://github.com/shashikanth-gs/a2a-wrapper/tree/main/a2a-codex). Exports `CodexEngineAdapter`; consumed by the `throng-agent` app. |
