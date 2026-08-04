@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,5 +248,71 @@ describe("throng-creds store/erase/gh", () => {
 
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toBe("");
+  });
+});
+
+/** Write the config file throng-creds reads on a cache miss. */
+function writeConfig(dir: string, config: Record<string, unknown>): void {
+  writeFileSync(join(dir, "config.json"), JSON.stringify(config, null, 2));
+}
+
+describe("throng-creds config resolution", () => {
+  it("declines silently when there is no config file", async () => {
+    const dir = sandbox();
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("");
+  });
+
+  it("declines when the config carries neither a token nor credentials", async () => {
+    const dir = sandbox();
+    writeConfig(dir, {});
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("serves a static github_token and caches it", async () => {
+    const dir = sandbox();
+    writeConfig(dir, { github_token: "ghp_static" });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("password=ghp_static");
+    expect(r.stdout).toContain("quit=1");
+
+    // Far-future expiry: every later call is a fast-path hit, so a standalone
+    // sandbox takes the slow path once per key for its whole life.
+    const entry = readFileSync(join(dir, "cache", "git_github.com_acme_app"), "utf8");
+    const serveUntil = Number(entry.split("\n")[0]);
+    expect(serveUntil).toBeGreaterThan(Math.floor(Date.now() / 1000) + 365 * 24 * 3600);
+  });
+
+  it("serves the static token for gh as well", async () => {
+    const dir = sandbox();
+    writeConfig(dir, { github_token: "ghp_static" });
+
+    const r = await run(dir, ["gh"]);
+
+    expect(r.stdout.trim()).toBe("ghp_static");
+  });
+
+  it("prefers a static github_token over credentials", async () => {
+    const dir = sandbox();
+    writeConfig(dir, {
+      github_token: "ghp_static",
+      // Unreachable on purpose: if this were consulted the test would hang or fail.
+      credentials: { url: "http://127.0.0.1:1", token: "task-tok" },
+    });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.stdout).toContain("password=ghp_static");
   });
 });

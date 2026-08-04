@@ -19,6 +19,7 @@ set -uo pipefail
 CONFIG_FILE="${THRONG_CONFIG:-/run/throng/config.json}"
 CACHE_DIR="${THRONG_CREDS_CACHE:-/run/throng/cache}"
 SKEW=300              # serve_until = expires_at - SKEW
+STATIC_TTL=315360000  # 10 years, for a literal github_token
 
 warn() { printf 'throng-creds: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
@@ -51,11 +52,48 @@ read_fresh() { # $1 = canonical key
   printf '%s' "$body"
 }
 
+# Atomic within the cache directory: git may be reading while we write.
+write_cache() { # $1=key $2=serve_until $3=username $4=token $5=password_expiry
+  local file tmp
+  cache_file "$1"; file="$REPLY"
+  mkdir -p "$CACHE_DIR" 2>/dev/null || return 1
+  tmp="$file.$$"
+  {
+    printf '%s\n' "$2"
+    printf '%s\n' "$1"
+    printf 'username=%s\n' "$3"
+    printf 'password=%s\n' "$4"
+    printf 'password_expiry_utc=%s\n' "$5"
+  } > "$tmp" || return 1
+  chmod 600 "$tmp" 2>/dev/null
+  mv -f "$tmp" "$file"
+}
+
+# Fills the cache for a key. Returns 1 to DECLINE — no config, or nothing
+# usable in it — which the caller turns into a silent exit 0.
+resolve() { # $1=key $2=purpose $3=host $4=repo (may be empty)
+  [ -r "$CONFIG_FILE" ] || return 1
+
+  # Read with jq, never sourced: this file holds a control-plane-supplied token,
+  # and `. file` would execute whatever it contains.
+  local static
+  static=$(jq -r '.github_token // empty' "$CONFIG_FILE" 2>/dev/null)
+  if [ -n "$static" ]; then
+    local expiry
+    expiry=$(( $(now) + STATIC_TTL ))
+    write_cache "$1" "$expiry" "x-access-token" "$static" "$expiry" || return 1
+    return 0
+  fi
+
+  return 1
+}
+
 # Prints the credential block for a key, from cache when fresh.
 # Returns 1 to decline.
 credential() { # $1=key $2=purpose $3=host $4=repo (may be empty)
   read_fresh "$1" && return 0
-  return 1
+  resolve "$@" || return 1
+  read_fresh "$1"
 }
 
 git_get() {
