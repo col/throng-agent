@@ -10,11 +10,13 @@ export type {
   Manifest,
   ValidateResult,
   UserIdentity,
+  CredentialsConfig,
 } from "./manifest/types.js";
 export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export type { Env } from "./env.js";
 export { clone, checkout, type GitResult } from "./bootstrap/git.js";
-export { runSetupCommands, describeSetupFailure, type SetupResult } from "./bootstrap/setup.js";
+export { runSetupCommands, describeSetupFailure, redactTokens, type SetupResult } from "./bootstrap/setup.js";
 export { injectGitIdentity } from "./bootstrap/git-identity.js";
+export { writeCredentialConfig, CONFIG_PATH } from "./creds/config.js";
 export { checkInitToken } from "./control/init-token.js";
 export { log } from "./log.js";

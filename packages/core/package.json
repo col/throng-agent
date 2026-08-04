@@ -8,7 +8,7 @@
   "main": "./dist/index.js",
   "files": ["dist"],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/creds && cp src/creds/throng-creds.sh src/creds/gh-shim.sh dist/creds/ && chmod +x dist/creds/throng-creds.sh dist/creds/gh-shim.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest --run",
     "clean": "rm -rf dist"
