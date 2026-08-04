@@ -71,16 +71,18 @@ the single unit of promotion that `template.ts` already depends on.
 
 | Path | What it is |
 |---|---|
-| `/usr/local/bin/throng-creds` | bash fast path: a cache hit is served from disk; a miss `exec`s into Node |
-| `/usr/local/bin/throng-creds-fetch` | two-line `sh` wrapper → `node /app/packages/core/dist/creds/cli.js` |
+| `/usr/local/bin/throng-creds` | the helper, entirely in bash |
 | `/usr/local/bin/gh` | bash shim → `exec env GH_TOKEN="$(throng-creds gh)" gh.real "$@"` |
 | `/usr/local/bin/gh.real` | the real `gh` binary — the Dockerfile's existing `install` target, renamed |
 
 Because the Dockerfile owns both `gh` names, the PATH-ordering hazard is
 designed out rather than verified: nothing else installs a `gh` into this image.
 
-Both shims use `#!/bin/bash`, not `#!/bin/sh` — Debian's `sh` is dash, which
+Both scripts use `#!/bin/bash`, not `#!/bin/sh` — Debian's `sh` is dash, which
 lacks the parameter expansion the fast path relies on.
+
+The Dockerfile gains `curl` and `jq` (~5MB). `flock` is already present via
+`util-linux`.
 
 ### Git configuration
 
@@ -144,24 +146,49 @@ Setup command output is captured verbatim into the control plane's
 
 ## `throng-creds`
 
-### Why two tiers
+### One language
 
-A cache hit must be fast, because git invokes the helper on every remote
-operation. A cache miss must be correct, because it involves HTTP, expiry
-parsing, scope, error classification and single-flight — the parts worth unit
-testing.
+The helper is a single bash script. An earlier draft split it — bash for cache
+hits, Node for everything else — on the grounds that HTTP, expiry parsing, error
+classification and single-flight deserved unit tests.
 
-So: bash serves cache hits, Node handles everything else. Node runs on genuine
-misses only, roughly once per (purpose, host, repo) per 50 minutes.
+That split was dropped once it became clear that `git get` must parse stdin
+before it can do anything at all, because the cache key derives from `host` and
+`path`. Parsing consumes stdin, so the parsed values would have to be handed to
+Node as arguments — which put the credential protocol, decline rules, key
+derivation and output format in bash regardless, and left Node with a couple of
+hundred lines of linear work. A spawn-and-assert test harness was needed for the
+bash side either way, and extending it with a stub HTTP server costs about what
+injecting a fake fetch into a Node CLI would have.
 
-This only works if the fast path needs no external tools. The cache format below
-is designed so that it needs none: no `jq`, no `sha256sum`, no `date -d`, and no
-expiry arithmetic. (Bash does parse git's `key=value` protocol on stdin, but
-that is a `read` loop over builtins, not a tool dependency.)
+Two things then actively favour bash:
+
+- **`flock` is a real syscall wrapper**, one line. Node has no binding for it,
+  so single-flight would be a hand-rolled `O_CREAT|O_EXCL` lockfile with backoff
+  and a staleness break — and the staleness break is precisely what misbehaves
+  under contention.
+- **`curl --retry 2` already covers transient retry**, including 5xx and
+  connection-refused, so retry and backoff logic stops needing to exist.
+
+What this gives up is type safety on the resolution path and stringier error
+message construction. Two things need care in review: splitting status from body
+via `-w '\n%{http_code}'` is brittle when a response has no trailing newline,
+and `set -euo pipefail` interacts badly with the `read` loop that parses stdin.
+
+If the resolution logic ever grows — multiple hosts, per-repo policy, GHES, a
+token map — moving it to Node is a contained rewrite of one file, with the test
+suite already in place.
+
+### Fast path and slow path
+
+The two tiers survive the merge, as paths within one script rather than a
+language boundary. A cache hit must be fast, because git invokes the helper on
+every remote operation; it must therefore fork nothing — no `jq`, no `date -d`,
+no `sha256sum`. The cache format is designed to make that possible.
 
 ### Cache format
 
-Written by Node to `/run/throng/cache/<sanitised-key>`:
+`/run/throng/cache/<sanitised-key>`:
 
 ```
 1754286260                    ← serve_until: expires_at MINUS skew, precomputed
@@ -171,55 +198,24 @@ password=ghs_…
 password_expiry_utc=1754286560
 ```
 
-Line 1 carries `expires_at - 300s` rather than the raw expiry, so **skew exists
-only in Node**. Bash's entire freshness test is `serve_until > now`.
+Line 1 carries `expires_at - 300s` rather than the raw expiry, so the fast path
+needs no ISO-8601 parsing and no arithmetic — its entire freshness test is
+`serve_until > now`. Skew is applied once, on write.
 
 Line 2 exists because filenames are the canonical key with unsafe characters
-replaced (`[^A-Za-z0-9._-]` → `_`), which bash computes with `${raw//…}` and no
-fork. That sanitising can collide — `acme/app` and `acme_app` map to the same
-filename — so bash string-compares line 2 against the key it wants. A mismatch
-falls through to Node, which rewrites the entry. Cheaper than hashing, and
+replaced (`[^A-Za-z0-9._-]` → `_`), computed with `${raw//…}` and no fork. That
+sanitising can collide — `acme/app` and `acme_app` map to the same filename — so
+the fast path string-compares line 2 against the key it wants. A mismatch falls
+through to the slow path, which rewrites the entry. Cheaper than hashing, and
 correct.
 
 A cache hit is therefore: one `read`, one integer compare, one string compare,
 one `tail`.
 
-Node writes via `.tmp` + `rename` so bash can never observe a half-written file.
+The slow path writes via a temp file and `mv` within the same directory, so the
+fast path can never observe a half-written file.
 
-### Node resolution order
-
-1. No readable `/run/throng/config.json` → **decline**: exit 0 with no output.
-   Public clones keep working in an uninitialised sandbox, which is what they
-   did before this change.
-2. `github_token` present → serve it with both `serve_until` and
-   `password_expiry_utc` set to `now + 10y`. No HTTP, ever. The far-future
-   expiry is what makes every subsequent call a pure-bash cache hit, so a
-   standalone sandbox invokes Node exactly once per key for its whole life.
-3. `credentials` present → `POST /v1/credentials/github`.
-4. Neither → decline.
-
-Step 2 before step 3 is the static-token precedence rule.
-
-### Single-flight
-
-Still required despite the fast path: N parallel git operations at boot all miss
-simultaneously. Node takes an `O_CREAT|O_EXCL` lockfile with backoff and a
-staleness break, re-checks the cache under the lock, then fetches and writes.
-
-### Division of responsibility
-
-`git get` must parse stdin before it can do anything else — the cache key is
-derived from `host` and `path`. Since that consumes stdin, the parsed values
-have to reach Node as arguments. So the split is:
-
-- **bash** owns the git credential protocol (stdin parsing, decline rules, key
-  derivation, stdout format) and the cache *read*.
-- **Node** owns resolution, HTTP, and the cache *write*. It never sees the git
-  protocol.
-
-Nothing is implemented twice.
-
-### Credential protocol (bash)
+### Credential protocol
 
 `get` parses `key=value` lines from stdin to EOF, then:
 
@@ -229,36 +225,47 @@ Nothing is implemented twice.
   later.
 - derives `repo` by stripping the leading `/` and any trailing `.git` from
   `path`.
-- looks up cache key `git|<host>|<repo>`.
-- on a hit, emits the entry's `username`, `password`, `password_expiry_utc`
-  lines followed by `quit=1`.
-- on a miss, `exec`s the fetch CLI (below), whose stdout becomes the response.
+- resolves cache key `git|<host>|<repo>`.
+- emits `username`, `password`, `password_expiry_utc`, `quit=1`.
 
 `store` drains stdin and exits 0 — nothing to persist, but it must not fail.
 
 `erase` drains stdin, removes the cache and exits 0. Git calls this after a 401,
 so the next operation re-mints rather than replaying a token GitHub has already
-rejected. Handled **entirely in bash**; it never invokes Node.
+rejected. It never touches the slow path.
 
-`gh` mode looks up `api|github.com|` — the shim cannot know which repo a given
-`gh` command targets, so `gh` always resolves against the task's default scope.
-On a hit it prints the value of the `password=` line; on a miss it `exec`s the
-fetch CLI in token format.
+`gh` mode resolves `api|github.com|` and prints the bare token. The shim cannot
+know which repo a given `gh` command targets, so `gh` always resolves against the
+task's default scope.
 
-### Fetch CLI (Node)
+### Resolution order
 
-```
-throng-creds-fetch --format <git|token> <purpose> <host> [repo]
-```
+On a cache miss, under the lock:
 
-`--format git` prints the git credential block including `quit=1`;
-`--format token` prints the bare token. Both write the cache entry first.
-Declining prints nothing and exits 0. Because bash `exec`s it, its stdout and
-exit status are the helper's.
+1. No readable `/run/throng/config.json` → **decline**: exit 0 with no output.
+   Public clones keep working in an uninitialised sandbox, which is what they
+   did before this change.
+2. `github_token` present → serve it with both `serve_until` and
+   `password_expiry_utc` set to `now + 10y`. No HTTP, ever. The far-future
+   expiry means a standalone sandbox takes the slow path exactly once per key
+   for its whole life, and every call after that is a fast-path hit.
+3. `credentials` present → `POST /v1/credentials/github`.
+4. Neither → decline.
 
-Taking (purpose, host, repo) as argv rather than parsing a protocol makes the
-resolution logic directly testable, and is why the CLI is a separate executable
-rather than a mode of the helper.
+Step 2 before step 3 is the static-token precedence rule.
+
+`config.json` is read with `jq`, never sourced. It is the one place a
+shell-sourced format would have been an injection hazard, and JSON removes the
+question.
+
+### Single-flight
+
+Required despite the fast path: N parallel git operations at boot all miss
+simultaneously, and GitHub rate-limits installation-token creation hard.
+
+`flock` on a per-key lock file, then **re-check the cache under the lock** — the
+process that blocked will find the entry the winner just wrote, and must not
+fetch again.
 
 ### Error messages
 
@@ -337,9 +344,10 @@ Written to `/run/throng/config.json`, mode `0600`, inside `/run/throng` at
 }
 ```
 
-JSON rather than shell-sourced environment assignments. Bash never reads this
-file — only Node does — so there is no reason to accept the quoting and
-injection hazards of `set -a; . file`, and a structured format can carry nested
+JSON read with `jq`, rather than shell-sourced environment assignments. Sourcing
+a file that holds a control-plane-supplied token is an injection hazard —
+`set -a; . file` executes whatever it contains — and it is avoidable for the cost
+of one `jq` call on the slow path only. A structured format also carries nested
 values later without inventing an environment-variable naming scheme.
 
 It is written once, at initialise, and never rewritten. See "Identity token
@@ -422,18 +430,23 @@ which is why `gh` always resolves against the default scope.
 
 ## Testing
 
-**Fetch CLI (vitest — the bulk):** resolution order and static-token precedence;
-decline when unconfigured; `serve_until` computation from `expires_at`; cache
-round-trip and atomic write; lock contention; 401/403/429/5xx classification;
-retry only on transient classes; `--format git` versus `--format token` output.
+**`throng-creds` (vitest, spawn-and-assert — the bulk).** Each case runs the
+real script against a temp `THRONG_CONFIG` and cache directory, with a stub HTTP
+server standing in for the credentials API. Two groups:
 
-**Bash helper (vitest spawning the script against temp directories):** this is
-where the git protocol is now tested, so it carries more than the fast path
-alone — cache hit; expired miss; key mismatch; malformed cache file; stdin
-parsing; decline on non-HTTPS and on a non-`github.com` host; repo derivation
-with and without a trailing `.git`; `store`; `erase`; `gh` token extraction.
-Each is a spawn-and-assert against a temp cache directory, with a stub standing
-in for the fetch CLI so the hand-off itself is asserted.
+*Protocol and fast path, no server needed* — cache hit; expired miss; key
+mismatch; malformed cache file; stdin parsing; decline on non-HTTPS and on a
+non-`github.com` host; repo derivation with and without a trailing `.git`;
+`store` exits 0; `erase` clears the cache; `gh` mode prints a bare token.
+
+*Resolution and slow path, against the stub* — decline when unconfigured; static
+token precedence over `credentials`; `serve_until` computed from `expires_at`;
+cache written atomically and reused on the next call; 401/403/429/5xx messages
+and exit statuses; transient classes retried, 4xx not; concurrent invocations
+producing exactly one upstream request.
+
+That last case is the one to write first — it is the only test that would catch
+a lock regression, and a stampede is silent until GitHub starts rate-limiting.
 
 **Integration:** extend `throng-agent/src/integration/boot.test.ts` for the
 reordered boot and the config write.
