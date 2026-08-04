@@ -11,7 +11,7 @@ function deps(over: Partial<BootDeps> = {}): BootDeps {
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     writeCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
-    workspaceRoot: "/workspace",
+    workspaceRoot: "/home/user/workspace",
     ...over,
   };
 }
@@ -107,7 +107,7 @@ describe("TaskRun credential ordering", () => {
   it("fails on the credentials step when the config cannot be written", async () => {
     const d = deps({
       writeCredentialConfig: vi.fn(() => {
-        throw new Error("EACCES: permission denied, mkdir '/run/throng'");
+        throw new Error("EACCES: permission denied, mkdir '/home/user/.throng'");
       }),
     });
 
@@ -169,7 +169,7 @@ describe("TaskRun credential ordering", () => {
     await tr.initialise(okPayload);
     await settle();
 
-    expect(d.clone).toHaveBeenCalledWith("https://x/y", "/workspace/y");
+    expect(d.clone).toHaveBeenCalledWith("https://x/y", "/home/user/workspace/y");
   });
 });
 

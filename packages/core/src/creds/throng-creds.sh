@@ -16,11 +16,33 @@
 
 set -uo pipefail
 
-CONFIG_FILE="${THRONG_CONFIG:-/run/throng/config.json}"
-CACHE_DIR="${THRONG_CREDS_CACHE:-/run/throng/cache}"
+# $HOME/.throng, not /run and not /dev/shm, and the reason is that this runs
+# unprivileged. E2B's envd starts the sandbox as uid 1000, while `docker run`
+# honours the image's USER (root) — so the same image runs under two different
+# uids depending on the host. /run is tmpfs owned root:root mode 0755, so
+# `mkdir /run/throng` is EACCES for everything E2B actually runs, and
+# pre-creating it in the image cannot help because /run is mounted fresh at boot.
+#
+# $HOME needs no privilege on either host, and unlike /dev/shm (mode 1777) its
+# parent is owned by the user — /home/user is user:user 755 — so no other uid can
+# pre-create or squat the directory. The directory is created 0700 and the config
+# file 0600 (see creds/config.ts) regardless.
+#
+# The trade is that $HOME is disk-backed rather than tmpfs, so the credential
+# does land on a persisted layer, which /run and /dev/shm were both chosen to
+# avoid. Accepted: E2B snapshots memory on pause anyway, and this design already
+# accepts that the agent can read the token.
+#
+# HOME is read, never guessed. creds/config.ts reads the same variable and
+# nothing else — not os.homedir(), whose passwd fallback would let the runtime
+# and this script resolve `~` differently. They write and read one file, and the
+# contract for "no config" is a silent decline, so a divergence would look
+# exactly like an unconfigured sandbox.
+CONFIG_FILE="${THRONG_CONFIG:-}"
+CACHE_DIR="${THRONG_CREDS_CACHE:-}"
 SKEW=300              # serve_until = expires_at - SKEW
 # 10 years, for a literal github_token. Never expiring is safe because
-# /run/throng/config.json is written once when the sandbox is created and never
+# the config file is written once when the sandbox is created and never
 # again: a changed static token cannot appear in a running sandbox, so a cache
 # entry minted from it can never go stale relative to its source.
 STATIC_TTL=315360000
@@ -52,23 +74,72 @@ case "$LOCK_TICKS" in
     LOCK_TICKS=75 ;;
 esac
 
-# git_erase removes this directory whole, as root in production, and lock
-# directories live in it too — so a mis-set THRONG_CREDS_CACHE is an `rm -rf` on
-# whatever it names. `${CACHE_DIR:?}` only rejects empty/unset, never a
-# dangerous *value*; these checks reject the value. Nothing can make an
-# arbitrary path safe, but `/`, a bare top-level directory, and anything
-# reachable by traversal are the ones that end a machine.
+# Fills in whichever of the two paths was not overridden, then validates the
+# cache one. Deferred to the modes that use them rather than done at assignment,
+# because an unset HOME must be fatal and `git store` must exit 0 whatever the
+# environment says — store is the one mode that reads and writes neither path,
+# and it is also the Dockerfile's build-time smoke check.
 #
-# Called from the modes that touch the cache rather than at startup. `git store`
-# must exit 0 whatever the environment says: git's protocol gives it no way to
-# report a failure, and it reads and writes nothing here.
+# Dying on an unset HOME rather than falling back: the fallbacks are all worse
+# than a loud failure. "/.throng" is root-owned and uncreatable as uid 1000 —
+# the exact bug this path change fixes — and anything cleverer would have to
+# agree with what creds/config.ts resolves in Node, which is the divergence the
+# header comment exists to prevent.
+prepare_paths() {
+  if [ -z "$CONFIG_FILE" ] || [ -z "$CACHE_DIR" ]; then
+    case "${HOME:-}" in
+      '') die "HOME is unset, so there is no \$HOME/.throng to use. Set HOME, or set THRONG_CONFIG and THRONG_CREDS_CACHE explicitly." ;;
+      /*) ;;
+      *)  die "HOME must be an absolute path, got '$HOME'." ;;
+    esac
+    [ -n "$CONFIG_FILE" ] || CONFIG_FILE="$HOME/.throng/config.json"
+    [ -n "$CACHE_DIR" ]   || CACHE_DIR="$HOME/.throng/cache"
+  fi
+  check_cache_dir
+}
+
+# REPLY <- $1 with repeated and trailing slashes collapsed, so that two spellings
+# of the same directory compare equal. Every refusal in check_cache_dir is a
+# string compare between two operator-supplied values, and a string compare is
+# only sound if both sides are spelled the same way: without this, a
+# THRONG_CONFIG with a doubled slash slips past the config-directory rule that
+# protects the one irrecoverable file in the design.
+normalise_path() {
+  local p="$1"
+  while [ "$p" != "${p//\/\//\/}" ]; do p="${p//\/\//\/}"; done
+  while [ "$p" != "/" ] && [ "$p" != "${p%/}" ]; do p="${p%/}"; done
+  REPLY="$p"
+}
+
+# Dies when CACHE_DIR is $1 (in any spelling). Empty $1 means "no such path in
+# this configuration" and refuses nothing. REPLY is safe to borrow here: the
+# functions that also own it (cache_file, uuid) do not run until after
+# prepare_paths has returned.
+refuse_cache_dir() { # $1 = path to refuse, $2 = why
+  [ -n "$1" ] || return 0
+  normalise_path "$1"
+  [ "$CACHE_DIR" = "$REPLY" ] || return 0
+  die "refusing '$CACHE_DIR_RAW' as the cache directory: $2, and 'git credential erase' deletes it whole."
+}
+
+# git_erase removes this directory whole — as root under `docker run`, as uid
+# 1000 under E2B — and lock directories live in it too, so a mis-set
+# THRONG_CREDS_CACHE is an `rm -rf` on whatever it names. `${CACHE_DIR:?}` only
+# rejects empty/unset, never a dangerous *value*; these checks reject the value.
+# Nothing can make an arbitrary path safe, but `/`, a bare top-level directory,
+# anything reachable by traversal, and the handful of specific paths named below
+# are the ones that end a machine or a task.
+#
+# Reached only through prepare_paths, so CACHE_DIR is always the resolved value
+# by the time it is checked.
 check_cache_dir() {
-  local CACHE_DIR_RAW="$CACHE_DIR"  # quote back what was set, not the normalised form
-  # Trailing slashes go first: "/cache/" has the same parent as "/run/cache" and
-  # would otherwise walk straight past the depth check below.
-  while [ "$CACHE_DIR" != "/" ] && [ "$CACHE_DIR" != "${CACHE_DIR%/}" ]; do
-    CACHE_DIR="${CACHE_DIR%/}"
-  done
+  # Quote the value back as it was set, not as normalised below. `local`, yet
+  # refuse_cache_dir reads it: bash scopes dynamically, so a callee sees its
+  # caller's locals.
+  local CACHE_DIR_RAW="$CACHE_DIR"
+  # Slashes are collapsed first: "/cache/" has the same parent as "/run/cache"
+  # and would otherwise walk straight past the depth check below.
+  normalise_path "$CACHE_DIR"; CACHE_DIR="$REPLY"
   case "$CACHE_DIR" in
     /*) ;;
     *)  die "THRONG_CREDS_CACHE must be an absolute path, got '$CACHE_DIR_RAW'." ;;
@@ -77,10 +148,38 @@ check_cache_dir() {
     */.|*/..|*/./*|*/../*)
         die "THRONG_CREDS_CACHE must not contain '.' or '..', got '$CACHE_DIR_RAW'." ;;
   esac
-  # Two segments minimum: "/", "/cache" and "/tmp" are all refused, "/run/throng/cache" is not.
+  # Two segments minimum: "/", "/cache" and "/tmp" are all refused,
+  # "/home/user/.throng/cache" — the default — is not.
   case "${CACHE_DIR%/*}" in
     ''|/) die "refusing '$CACHE_DIR_RAW' as the cache directory: too close to the filesystem root, and 'git credential erase' deletes it whole." ;;
   esac
+  # Four paths the depth rule cannot see, each of which an `erase` would destroy:
+  #
+  # $HOME sails through it — /home/user's parent is /home, not "/" — and it is
+  # now the parent of the cache, the config file AND the workspace. "Just point
+  # it at ~" is the mis-set "/run" used to be.
+  refuse_cache_dir "${HOME:-}" \
+    "it is \$HOME, which also holds the credential config and the workspace"
+  # The config directory, for a sharper version of the same argument. Everything
+  # else an erase destroys is re-mintable on the next operation; config.json is
+  # not. It is written once at initialise and there is no rotation path into a
+  # running sandbox, so losing it takes away the only identity the sandbox will
+  # ever have.
+  refuse_cache_dir "${CONFIG_FILE%/*}" "it holds the write-once credential config"
+  # The workspace, which is what the $HOME rule above is really protecting and
+  # which sits one segment below it. This is the only place the helper looks at
+  # WORKSPACE_DIR, and only to know what NOT to delete; the default mirrors
+  # defaultBootDeps() in control/server.ts.
+  refuse_cache_dir "${WORKSPACE_DIR:-${HOME:+$HOME/workspace}}" \
+    "it is the workspace the task's repos were cloned into"
+  # /dev/shm no longer has the "parent of the default" argument behind it — the
+  # default moved to $HOME. It is kept anyway, on two grounds that outlive that:
+  # it is still the one two-segment path in this image that is a world-writable
+  # mount shared with every other process in the sandbox, so an erase there
+  # damages more than the caller owns; and it WAS the default one release ago, so
+  # a template or operator carrying the old value forward is a live possibility
+  # rather than a hypothetical one.
+  refuse_cache_dir /dev/shm "it is a tmpfs mount shared with the whole sandbox"
 }
 
 # REPLY <- the cache file for a canonical key. Sanitising can collide
@@ -114,7 +213,7 @@ read_fresh() { # $1 = canonical key
 write_cache() { # $1=key $2=serve_until $3=username $4=token $5=password_expiry
   local file tmp
   cache_file "$1"; file="$REPLY"
-  mkdir -p "$CACHE_DIR" 2>/dev/null || return 1
+  mkdir -m 700 -p "$CACHE_DIR" 2>/dev/null || return 1
   tmp="$file.$$"
   {
     printf '%s\n' "$2"
@@ -139,7 +238,7 @@ LOCK_DIR=""
 acquire_lock() { # $1 = canonical key
   local lock ticks=0 broke=0
   cache_file "$1"; lock="$REPLY.lock"
-  mkdir -p "$CACHE_DIR" 2>/dev/null
+  mkdir -m 700 -p "$CACHE_DIR" 2>/dev/null
   # Armed before the lock is taken, not after: a signal in the window between
   # the winning mkdir and the trap would otherwise leak the lock. Arming early
   # is a no-op on every path that bails, because release_lock does nothing until
@@ -352,14 +451,14 @@ git_get() {
   repo="${path#/}"
   repo="${repo%.git}"
 
-  check_cache_dir
+  prepare_paths
   credential "git|$host|$repo" git "$host" "$repo" || exit 0
   printf 'quit=1\n'
 }
 
 git_erase() {
   cat >/dev/null
-  check_cache_dir
+  prepare_paths
   # Git calls erase after a 401. Drop the whole directory rather than globbing:
   # lock directories live here too, and a partial clear would leave a rejected
   # token in play for some other key.
@@ -378,7 +477,7 @@ git_erase() {
 # resolves against the task's default scope.
 gh_token() {
   local out line
-  check_cache_dir
+  prepare_paths
   out=$(credential "api|github.com|" api "github.com" "") || exit 0
   while IFS= read -r line; do
     case "$line" in

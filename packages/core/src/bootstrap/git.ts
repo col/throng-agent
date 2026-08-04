@@ -22,10 +22,13 @@ function run(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }): P
  *
  * This covers only the runtime's OWN subprocesses. The agent's `git push` an
  * hour later is not descended from this process, so the guarantee that matters
- * in production is `ENV GIT_TERMINAL_PROMPT=0` in the image, which reaches every
- * process in the sandbox. This is kept anyway: it costs nothing, it makes the
- * clone/checkout path correct outside the image (where these unit tests run),
- * and it does not depend on the Dockerfile to be true.
+ * in production is `startControlServer()` setting the same variable on the
+ * runtime's `process.env`, which every process in the sandbox then inherits.
+ * (The image's `ENV GIT_TERMINAL_PROMPT=0` is kept too, but E2B's runtime
+ * environment inherits no image ENV, so it only covers `docker run`.) This is
+ * kept anyway: it costs nothing, it makes the clone/checkout path correct when
+ * this module is used outside the runtime — where these unit tests run — and it
+ * does not depend on either of the other two to be true.
  */
 const noPrompt = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_TERMINAL_PROMPT: "0" });
 
