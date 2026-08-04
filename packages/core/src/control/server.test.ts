@@ -9,7 +9,7 @@ const bootDeps: BootDeps = {
   clone: async () => ({ ok: true, output: "" }),
   checkout: async () => ({ ok: true, output: "" }),
   runSetupCommands: async () => ({ ok: true }),
-  injectGitCredentials: () => {},
+  writeCredentialConfig: () => {},
   injectGitIdentity: () => {},
   workspaceRoot: "/workspace",
 };

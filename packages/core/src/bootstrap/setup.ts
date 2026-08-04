@@ -9,6 +9,22 @@ export type SetupResult =
 const OUTPUT_TAIL_CHARS = 2000;
 
 /**
+ * GitHub's token prefixes: ghp_ (classic PAT), gho_ (OAuth), ghu_ (user-to-server),
+ * ghs_ (installation), ghr_ (refresh).
+ *
+ * Setup commands used to run before any credential existed. Under the pull model
+ * the credential config is written before cloning, so they run with working git
+ * and gh — and their output is captured verbatim into the control plane's
+ * `instance.error_message`. A command that echoes its environment, or runs
+ * `git config --list`, would otherwise persist a live token.
+ */
+const TOKEN_PATTERN = /gh[pousr]_[A-Za-z0-9]{16,}/g;
+
+export function redactTokens(text: string): string {
+  return text.replace(TOKEN_PATTERN, "[REDACTED]");
+}
+
+/**
  * Exit codes a POSIX shell reports as 128 + signal. A setup command that dies this
  * way produced no error text of its own, so the bare code is all the operator gets
  * — and 137 in particular (the OOM killer reaping a compile) is the single most
@@ -57,23 +73,34 @@ function tail(output: string, chars = OUTPUT_TAIL_CHARS): string {
  *
  * This ends up in the orchestrator's `instance.error_message` via `/api/status`,
  * so it is the ONLY diagnostic most operators will see — the sandbox is usually
- * gone by the time anyone looks. Setup runs before any credential injection, so
- * the output cannot contain the manifest's tokens.
+ * gone by the time anyone looks.
+ *
+ * Setup commands run WITH live credentials under the pull model, so the output
+ * is redacted before it leaves this process.
  */
 export function describeSetupFailure(result: Extract<SetupResult, { ok: false }>): string {
   const how = SIGNAL_EXITS[result.code]
     ? `exit ${result.code} — ${SIGNAL_EXITS[result.code]}`
     : `exit ${result.code}`;
-  const body = tail(result.output);
+  // Redact BEFORE truncating. The other order slices a token straddling the
+  // 2000-char boundary: the `gh?_` prefix falls outside the tail, so the pattern
+  // no longer matches and the token's suffix is kept verbatim.
+  const body = tail(redactTokens(result.output));
   const outputBlock = body ? `\n--- output (tail) ---\n${body}` : "\n(no output)";
-  return `setup command failed: ${result.command} (${how})${outputBlock}`;
+  // The command is caller-supplied and as token-bearing as the output: a
+  // `git clone https://ghp_…@github.com/…` in `setup_commands` lands in the same
+  // `instance.error_message`.
+  return `setup command failed: ${redactTokens(result.command)} (${how})${outputBlock}`;
 }
 
 /** Runs commands sequentially in `cwd`; the first non-zero exit fails the run. */
 export async function runSetupCommands(cwd: string, commands: string[]): Promise<SetupResult> {
   for (const [index, command] of commands.entries()) {
     const step = `${index + 1}/${commands.length}`;
-    log.info("setup command starting", { step, command, cwd });
+    // Logged redacted, returned verbatim: `command` is passed to the shell from
+    // the manifest, so it may carry a token, but the caller needs the real string.
+    const safeCommand = redactTokens(command);
+    log.info("setup command starting", { step, command: safeCommand, cwd });
     const startedAt = Date.now();
     const { code, signal, output } = await runOne(cwd, command);
     const durationMs = Date.now() - startedAt;
@@ -81,11 +108,11 @@ export async function runSetupCommands(cwd: string, commands: string[]): Promise
     if (code !== 0) {
       // Full output at ERROR — the message carries only the tail, and a truncated
       // compile log is exactly what makes these failures hard to diagnose.
-      log.error("setup command failed", { step, command, code, signal, durationMs, output });
+      log.error("setup command failed", { step, command: safeCommand, code, signal, durationMs, output: redactTokens(output) });
       return { ok: false, command, code, signal, output };
     }
 
-    log.info("setup command finished", { step, command, durationMs });
+    log.info("setup command finished", { step, command: safeCommand, durationMs });
   }
   return { ok: true };
 }

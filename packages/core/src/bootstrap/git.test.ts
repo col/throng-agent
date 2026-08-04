@@ -39,7 +39,7 @@ describe("git clone/checkout", () => {
   it("clones a repo and checks out a ref", async () => {
     const src = makeSourceRepo();
     const dest = join(tmp(), "work");
-    const c = await clone(`file://${src}`, dest, null);
+    const c = await clone(`file://${src}`, dest);
     expect(c.ok).toBe(true);
     const co = await checkout(dest, "feature");
     expect(co.ok).toBe(true);
@@ -50,7 +50,7 @@ describe("git clone/checkout", () => {
   it("returns an error result (never throws) on a bad ref", async () => {
     const src = makeSourceRepo();
     const dest = join(tmp(), "work2");
-    await clone(`file://${src}`, dest, null);
+    await clone(`file://${src}`, dest);
     const co = await checkout(dest, "no-such-ref");
     expect(co.ok).toBe(false);
     if (!co.ok) expect(co.code).not.toBe(0);

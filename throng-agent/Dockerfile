@@ -20,7 +20,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:20-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates git build-essential gpg wget \
+      ca-certificates git build-essential gpg wget curl jq \
  && install -dm 755 /etc/apt/keyrings \
  && wget -qO - https://mise.jdx.dev/gpg-key.pub \
       | gpg --dearmor -o /etc/apt/keyrings/mise-archive-keyring.gpg \
@@ -38,16 +38,22 @@ RUN apt-get update \
 # the shells the agent spawns. Pinned rather than apt-sourced: the image is the
 # unit of promotion (DEV_VERSION/PROD_VERSION), so a rebuild of "the same" version
 # must not quietly pick up a different gh. `dpkg --print-architecture` keeps a
-# local arm64 build working even though E2B runs amd64; the final `gh --version`
-# turns a bad URL into a failed build instead of a missing binary at runtime.
+# local arm64 build working even though E2B runs amd64; the final `gh.real
+# --version` turns a bad URL into a failed build instead of a missing binary at
+# runtime.
+#
+# Installed as `gh.real`: /usr/local/bin/gh is a shim that fetches a fresh token
+# per invocation, because GH_TOKEN cannot be refreshed once a process has
+# started. Because this image owns both names, PATH ordering cannot resolve to
+# the wrong one.
 ARG GH_VERSION=2.96.0
 RUN arch="$(dpkg --print-architecture)" \
  && wget -qO /tmp/gh.tar.gz \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" \
  && tar -xzf /tmp/gh.tar.gz -C /tmp \
- && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh \
+ && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${arch}/bin/gh" /usr/local/bin/gh.real \
  && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_${arch}" \
- && gh --version
+ && gh.real --version
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/packages/core/dist ./packages/core/dist
@@ -58,6 +64,43 @@ COPY --from=build /app/throng-agent-codex/dist ./throng-agent-codex/dist
 COPY --from=build /app/throng-agent-codex/package.json ./throng-agent-codex/package.json
 COPY --from=build /app/throng-agent/dist ./throng-agent/dist
 COPY --from=build /app/throng-agent/package.json ./throng-agent/package.json
+# Credential plumbing. git and gh both fetch a short-lived token at the moment
+# of use via throng-creds, which reads /run/throng/config.json — written by
+# POST /api/initialise before any clone.
+#
+# The git config is baked in here rather than written at initialise because it
+# is a constant. `useHttpPath` is required, not optional: without it git never
+# sends `path=`, so no request can name a repo and everything collapses to the
+# task's default scope. The helper is referenced by absolute path because git
+# invokes helpers through /bin/sh, whose PATH may not include /usr/local/bin.
+#
+# The last three are build-time smoke checks: `throng-creds git store` proves the
+# script parses and exits 0, and `gh --version` proves the shim resolves gh.real
+# and declines cleanly with no config present. `gh --version` reaches the cache
+# path and so creates /run/throng/cache; the rm keeps that build-time side effect
+# out of the shipped image, which must start with nothing configured.
+RUN install -m 0755 /app/packages/core/dist/creds/throng-creds.sh /usr/local/bin/throng-creds \
+ && install -m 0755 /app/packages/core/dist/creds/gh-shim.sh /usr/local/bin/gh \
+ && git config --system credential.helper '/usr/local/bin/throng-creds git' \
+ && git config --system credential.useHttpPath true \
+ && git config --system url."https://github.com/".insteadOf git@github.com: \
+ && throng-creds git store </dev/null \
+ && gh --version \
+ && rm -rf /run/throng
+# Part of the same constant as the git config above, and it belongs in the image
+# for the same reason. When throng-creds declines or dies — a 403, an unreachable
+# service, an unconfigured sandbox — git falls back to asking for a username.
+# Without a TTY that is an immediate error; WITH one it blocks forever, and the
+# README's standalone recipe reaches in over `docker exec`. A blocked git
+# operation is the worst outcome this design has, so the prompt is disabled
+# process-wide rather than per-subprocess.
+#
+# ENV, not the runtime's process.env: the runtime used to set it during boot and
+# every child inherited it, but the agent's own `git push` an hour later is not a
+# child of any boot-time process. Set here it reaches every process in the
+# sandbox, whatever spawned it. It also removes the only path by which an
+# interactive credential could be typed in.
+ENV GIT_TERMINAL_PROMPT=0
 ENV CONTROL_PORT=8080
 # node:20-slim (Debian 12) sets no LANG, so every process in the sandbox inherits
 # the `C` locale. That makes locale-sensitive toolchains misbehave on non-ASCII

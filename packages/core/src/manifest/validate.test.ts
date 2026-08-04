@@ -78,10 +78,6 @@ describe("validate (github_token)", () => {
     expect(tok({}).github_token).toBeNull();
   });
 
-  it("gives repos with no token of their own the resolved token", () => {
-    expect(tok({ github_token: "root_token" }).repos[0].token).toBe("root_token");
-  });
-
   it("rejects a non-string github_token", () => {
     const r = validate({ ...okInput, github_token: 1 }, registry, {});
     expect(r.ok).toBe(false);
@@ -149,5 +145,84 @@ describe("validate (user_identity)", () => {
         "user_identity.name",
       ]);
     }
+  });
+});
+
+describe("credentials block", () => {
+  const base = {
+    repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: true }],
+    agent: { platform: "test", model: "m" },
+  };
+
+  it("is optional", () => {
+    const r = validate(base, registry);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.credentials).toBeNull();
+  });
+
+  it("resolves url and token onto the manifest", () => {
+    const r = validate(
+      { ...base, credentials: { url: "https://cp.example", token: "task-tok" } },
+      registry,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.credentials).toEqual({ url: "https://cp.example", token: "task-tok" });
+  });
+
+  it("rejects a non-object", () => {
+    const r = validate({ ...base, credentials: "nope" }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "credentials")).toBe(true);
+  });
+
+  it("rejects a blank url or token", () => {
+    const r = validate({ ...base, credentials: { url: "  ", token: "" } }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors.some((e) => e.field === "credentials.url")).toBe(true);
+      expect(r.errors.some((e) => e.field === "credentials.token")).toBe(true);
+    }
+  });
+
+  it("rejects a missing url", () => {
+    const r = validate({ ...base, credentials: { token: "t" } }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "credentials.url")).toBe(true);
+  });
+
+  it("rejects a non-https url", () => {
+    const r = validate({ ...base, credentials: { url: "http://cp.example", token: "t" } }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "credentials.url")).toBe(true);
+  });
+
+  it("rejects a trailing slash on the url", () => {
+    const r = validate({ ...base, credentials: { url: "https://cp.example/", token: "t" } }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "credentials.url")).toBe(true);
+  });
+
+  // Accepted so an unchanged control plane does not start receiving 400s, but
+  // it carries no information: throng-creds scopes per repo already.
+  it("accepts and ignores repos[].token", () => {
+    const r = validate(
+      {
+        ...base,
+        repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: true, token: "ghs_old" }],
+      },
+      registry,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect("token" in r.manifest.repos[0]).toBe(false);
+  });
+
+  it("keeps github_token and its GITHUB_TOKEN fallback", () => {
+    const explicit = validate({ ...base, github_token: "ghp_a" }, registry, {});
+    expect(explicit.ok).toBe(true);
+    if (explicit.ok) expect(explicit.manifest.github_token).toBe("ghp_a");
+
+    const fallback = validate(base, registry, { GITHUB_TOKEN: "ghp_b" });
+    expect(fallback.ok).toBe(true);
+    if (fallback.ok) expect(fallback.manifest.github_token).toBe("ghp_b");
   });
 });

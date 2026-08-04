@@ -1,8 +1,8 @@
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { describeSetupFailure, runSetupCommands } from "./setup.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { describeSetupFailure, redactTokens, runSetupCommands } from "./setup.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "a2a-setup-"));
 
@@ -89,5 +89,99 @@ describe("describeSetupFailure", () => {
     expect(message).toContain("THE-ACTUAL-ERROR");
     expect(message).toMatch(/earlier chars omitted/);
     expect(message.length).toBeLessThan(2500);
+  });
+});
+
+describe("token redaction", () => {
+  it("redacts every GitHub token prefix", () => {
+    const text = [
+      "ghp_0123456789abcdefghij",
+      "ghs_0123456789abcdefghij",
+      "gho_0123456789abcdefghij",
+      "ghu_0123456789abcdefghij",
+      "ghr_0123456789abcdefghij",
+    ].join(" ");
+
+    const out = redactTokens(text);
+
+    expect(out).not.toMatch(/gh[pousr]_/);
+    expect(out.match(/\[REDACTED\]/g)).toHaveLength(5);
+  });
+
+  it("leaves ordinary output alone", () => {
+    const text = "npm ERR! missing script: buidl\nat github.com/acme/app";
+    expect(redactTokens(text)).toBe(text);
+  });
+
+  // This text is stored verbatim in the control plane's instance.error_message.
+  // Setup commands now run with live credentials, so a command echoing its
+  // environment would otherwise persist a minted token.
+  it("redacts inside a setup failure message", () => {
+    const message = describeSetupFailure({
+      ok: false,
+      command: "env",
+      code: 1,
+      signal: null,
+      output: "GH_TOKEN=ghs_0123456789abcdefghij\n",
+    });
+
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain("ghs_0123456789abcdefghij");
+  });
+
+  // Truncating before redacting slices a token that straddles the 2000-char
+  // boundary: the `ghs_` prefix falls outside the tail, so the pattern no longer
+  // matches and the token's SUFFIX is kept verbatim. Redacting first closes it.
+  it("redacts a token that straddles the truncation boundary", () => {
+    // 24 chars. Positioned so its last 10 land inside the tail and its prefix
+    // does not: 1990 trailing chars + 24 = the cut falls mid-token.
+    const token = "ghs_ABCDEFGHIJKLMNOPQRST";
+    const message = describeSetupFailure({
+      ok: false,
+      command: "noisy",
+      code: 1,
+      signal: null,
+      output: `${"x".repeat(3000)}${token}${"y".repeat(1990)}`,
+    });
+
+    expect(message).toMatch(/earlier chars omitted/); // truncation really happened
+    expect(message).not.toContain(token);
+    expect(message).not.toContain("KLMNOPQRST"); // nor the surviving tail of it
+    expect(message).toContain("[REDACTED]");
+  });
+
+  // The COMMAND is as token-bearing as the output. `setup_commands` is caller
+  // supplied, and a `git clone https://ghp_…@github.com/...` in it lands in the
+  // same instance.error_message the output half is already redacted for.
+  it("redacts a token in the failing command, not just in its output", () => {
+    const message = describeSetupFailure({
+      ok: false,
+      command: "git clone https://ghp_0123456789abcdefghij@github.com/acme/app",
+      code: 128,
+      signal: null,
+      output: "fatal: repository not found\n",
+    });
+
+    expect(message).not.toContain("ghp_0123456789abcdefghij");
+    expect(message).toContain("[REDACTED]");
+    expect(message).toContain("github.com/acme/app"); // still identifies the command
+  });
+});
+
+describe("runSetupCommands logging", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("redacts a token in the command on both the start and failure log lines", async () => {
+    const lines: string[] = [];
+    const capture = (line: unknown) => void lines.push(String(line));
+    vi.spyOn(console, "log").mockImplementation(capture);
+    vi.spyOn(console, "error").mockImplementation(capture);
+    const dir = tmp();
+
+    await runSetupCommands(dir, ["echo ghp_0123456789abcdefghij && exit 3"]);
+
+    expect(lines.some((l) => l.includes("setup command starting"))).toBe(true);
+    expect(lines.some((l) => l.includes("setup command failed"))).toBe(true);
+    for (const line of lines) expect(line).not.toContain("ghp_0123456789abcdefghij");
   });
 });

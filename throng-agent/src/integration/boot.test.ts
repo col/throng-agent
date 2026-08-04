@@ -9,7 +9,7 @@ function fakeDeps(): BootDeps {
     clone: vi.fn(async () => ({ ok: true, output: "" })),
     checkout: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
-    injectGitCredentials: vi.fn(() => {}),
+    writeCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
     workspaceRoot: "/workspace",
   };
@@ -35,5 +35,18 @@ describe("throng-agent boot routing", () => {
     if (state === "failed") {
       expect(tr.lifecycle.status().error?.step).not.toBe("boot");
     }
+  });
+});
+
+describe("throng-agent credential wiring", () => {
+  it("exposes the credential config writer through the core package", async () => {
+    const { writeCredentialConfig } = await import("@throng/agent-core");
+    expect(typeof writeCredentialConfig).toBe("function");
+  });
+
+  it("no longer exposes the askpass path", async () => {
+    const core = await import("@throng/agent-core");
+    expect("ASKPASS" in core).toBe(false);
+    expect("injectGitCredentials" in core).toBe(false);
   });
 });

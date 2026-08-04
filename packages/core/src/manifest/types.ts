@@ -5,7 +5,20 @@ export interface RepoSpec {
   ref: string;
   dest: string;
   primary: boolean;
-  token: string | null;
+}
+
+/**
+ * Where `throng-creds` fetches GitHub tokens from, and the identity it presents
+ * when it does.
+ *
+ * `token` is task-scoped: useless outside the control plane, revocable per task,
+ * and bound server-side to an installation, a repo set and a permission set. It
+ * must stay valid for the task's entire lifetime including pauses — there is no
+ * rotation path into a running sandbox.
+ */
+export interface CredentialsConfig {
+  url: string;
+  token: string;
 }
 
 export interface FieldError {
@@ -30,6 +43,9 @@ export interface UserIdentity {
 /** Engine-agnostic manifest skeleton owned by core. */
 export interface BaseManifest {
   repos: RepoSpec[];
+  /** Pull mode. Null in standalone mode, where `github_token` is used instead. */
+  credentials: CredentialsConfig | null;
+  /** A literal token. Takes precedence over `credentials` when both are set. */
   github_token: string | null;
   user_identity: UserIdentity;
   setup_commands: string[];
