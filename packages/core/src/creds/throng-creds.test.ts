@@ -320,7 +320,14 @@ describe("throng-creds config resolution", () => {
 
 interface Stub {
   url: string;
-  requests: Array<{ body: string; auth: string | undefined; idempotency: string | undefined }>;
+  requests: Array<{
+    method: string | undefined;
+    path: string | undefined;
+    body: string;
+    auth: string | undefined;
+    contentType: string | undefined;
+    idempotency: string | undefined;
+  }>;
   close: () => Promise<void>;
 }
 
@@ -334,8 +341,14 @@ async function stubApi(
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       requests.push({
+        // The stub answers any method on any path, so the method and URL are
+        // recorded and asserted rather than assumed: POST /v1/credentials/github
+        // is the hardest part of this contract to change later.
+        method: req.method,
+        path: req.url,
         body,
         auth: req.headers.authorization,
+        contentType: req.headers["content-type"],
         idempotency: req.headers["idempotency-key"] as string | undefined,
       });
       const { status, body: payload } = reply(requests.length);
@@ -363,8 +376,11 @@ async function api(reply: (n: number) => { status: number; body: unknown }): Pro
   return s;
 }
 
+// The username is deliberately NOT "x-access-token": that is the script's own
+// fallback, so an identical value here would let a hardcoded literal pass for
+// working server-to-cache plumbing.
 const okBody = (token: string, expiresAt: string) => ({
-  username: "x-access-token",
+  username: "bot-user",
   token,
   expires_at: expiresAt,
   scope: { repos: ["acme/app"], permissions: { contents: "write" } },
@@ -383,8 +399,12 @@ describe("throng-creds credentials API", () => {
 
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("password=ghs_minted");
+    expect(r.stdout).toContain("username=bot-user");
     expect(stub.requests).toHaveLength(1);
+    expect(stub.requests[0].method).toBe("POST");
+    expect(stub.requests[0].path).toBe("/v1/credentials/github");
     expect(stub.requests[0].auth).toBe("Bearer task-tok");
+    expect(stub.requests[0].contentType).toBe("application/json");
     expect(stub.requests[0].idempotency).toBeTruthy();
     expect(JSON.parse(stub.requests[0].body)).toEqual({
       purpose: "git",
@@ -508,5 +528,54 @@ describe("throng-creds credentials API", () => {
 
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("expires_at");
+  });
+
+  // Unlike expires_at, a missing username has one safe universal value.
+  it("falls back to x-access-token when the server omits username", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({
+      status: 200,
+      body: { token: "ghs_nouser", expires_at: isoIn(3600) },
+    }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("username=x-access-token");
+    expect(r.stdout).toContain("password=ghs_nouser");
+  });
+
+  // A 404 — a mistyped credentials.url, or an API version bump — is the
+  // likeliest unclassified status, and it never succeeds. Telling the agent to
+  // retry it is the same mislabelling the 403 message exists to avoid.
+  it("describes an unclassified 4xx as permanent, not transient", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 404, body: {} }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("404");
+    expect(r.stderr).toContain("retrying will not help");
+    // The exact phrase the 5xx branch uses, and the one that would mislead here.
+    expect(r.stderr).not.toContain("This is transient");
+    expect(stub.requests).toHaveLength(1);
+  });
+
+  // serve_until would land in the past, so write_cache would succeed and
+  // read_fresh would then reject the entry it had just written — declining with
+  // no output and no reason, and re-minting on every operation.
+  it("refuses a token that expires within the skew window", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_toosoon", isoIn(60)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("too soon to use");
+    expect(existsSync(join(dir, "cache", "git_github.com_acme_app"))).toBe(false);
   });
 });

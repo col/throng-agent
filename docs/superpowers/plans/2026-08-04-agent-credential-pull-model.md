@@ -727,7 +727,14 @@ import { afterEach } from "vitest";
 
 interface Stub {
   url: string;
-  requests: Array<{ body: string; auth: string | undefined; idempotency: string | undefined }>;
+  requests: Array<{
+    method: string | undefined;
+    path: string | undefined;
+    body: string;
+    auth: string | undefined;
+    contentType: string | undefined;
+    idempotency: string | undefined;
+  }>;
   close: () => Promise<void>;
 }
 
@@ -741,8 +748,14 @@ async function stubApi(
     req.on("data", (c) => (body += c));
     req.on("end", () => {
       requests.push({
+        // The stub answers any method on any path, so the method and URL are
+        // recorded and asserted rather than assumed: POST /v1/credentials/github
+        // is the hardest part of this contract to change later.
+        method: req.method,
+        path: req.url,
         body,
         auth: req.headers.authorization,
+        contentType: req.headers["content-type"],
         idempotency: req.headers["idempotency-key"] as string | undefined,
       });
       const { status, body: payload } = reply(requests.length);
@@ -770,8 +783,11 @@ async function api(reply: (n: number) => { status: number; body: unknown }): Pro
   return s;
 }
 
+// The username is deliberately NOT "x-access-token": that is the script's own
+// fallback, so an identical value here would let a hardcoded literal pass for
+// working server-to-cache plumbing.
 const okBody = (token: string, expiresAt: string) => ({
-  username: "x-access-token",
+  username: "bot-user",
   token,
   expires_at: expiresAt,
   scope: { repos: ["acme/app"], permissions: { contents: "write" } },
@@ -790,8 +806,12 @@ describe("throng-creds credentials API", () => {
 
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("password=ghs_minted");
+    expect(r.stdout).toContain("username=bot-user");
     expect(stub.requests).toHaveLength(1);
+    expect(stub.requests[0].method).toBe("POST");
+    expect(stub.requests[0].path).toBe("/v1/credentials/github");
     expect(stub.requests[0].auth).toBe("Bearer task-tok");
+    expect(stub.requests[0].contentType).toBe("application/json");
     expect(stub.requests[0].idempotency).toBeTruthy();
     expect(JSON.parse(stub.requests[0].body)).toEqual({
       purpose: "git",
@@ -916,6 +936,55 @@ describe("throng-creds credentials API", () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("expires_at");
   });
+
+  // Unlike expires_at, a missing username has one safe universal value.
+  it("falls back to x-access-token when the server omits username", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({
+      status: 200,
+      body: { token: "ghs_nouser", expires_at: isoIn(3600) },
+    }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("username=x-access-token");
+    expect(r.stdout).toContain("password=ghs_nouser");
+  });
+
+  // A 404 — a mistyped credentials.url, or an API version bump — is the
+  // likeliest unclassified status, and it never succeeds. Telling the agent to
+  // retry it is the same mislabelling the 403 message exists to avoid.
+  it("describes an unclassified 4xx as permanent, not transient", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 404, body: {} }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("404");
+    expect(r.stderr).toContain("retrying will not help");
+    // The exact phrase the 5xx branch uses, and the one that would mislead here.
+    expect(r.stderr).not.toContain("This is transient");
+    expect(stub.requests).toHaveLength(1);
+  });
+
+  // serve_until would land in the past, so write_cache would succeed and
+  // read_fresh would then reject the entry it had just written — declining with
+  // no output and no reason, and re-minting on every operation.
+  it("refuses a token that expires within the skew window", async () => {
+    const dir = sandbox();
+    const stub = await api(() => ({ status: 200, body: okBody("ghs_toosoon", isoIn(60)) }));
+    writeConfig(dir, { credentials: { url: stub.url, token: "task-tok" } });
+
+    const r = await run(dir, ["git", "get"], { stdin: getStdin("acme/app.git") });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("too soon to use");
+    expect(existsSync(join(dir, "cache", "git_github.com_acme_app"))).toBe(false);
+  });
 });
 ```
 
@@ -942,26 +1011,44 @@ uuid() {
 
 # GNU date and BSD date disagree on parsing; try both. The API contract
 # specifies ISO-8601 with a Z suffix, which is all we accept.
+#
+# The strict BSD form goes FIRST, and the order is load-bearing. On a BSD that
+# still has `date -d` (FreeBSD, and macOS before it was dropped), `date -u -d
+# "<iso>" +%s` reads the timestamp as a daylight-saving flag and prints the
+# CURRENT epoch with exit 0 — so a leading `-d` attempt would be silently
+# accepted and every token would be dated now. The `-j -f` form cannot be
+# misread: GNU date has no `-j` and simply exits non-zero.
 iso_to_epoch() {
-  date -u -d "$1" +%s 2>/dev/null && return 0
   date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null && return 0
+  date -u -d "$1" +%s 2>/dev/null && return 0
   return 1
 }
 
 fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
-  local req resp rc status body msg username tok exp_iso exp_epoch serve_until scope
+  local req resp rc rid status body msg username tok exp_iso exp_epoch serve_until scope
 
   req=$(jq -nc --arg p "$2" --arg h "$3" --arg r "$4" \
         '{purpose:$p, host:$h} + (if $r == "" then {} else {repo:$r} end)')
 
-  uuid
-  # --retry covers 5xx, timeouts and connection-refused. A 4xx is never retried,
-  # which is what we want: a 403 will not become a 200.
-  resp=$(curl -sS --max-time 10 --retry 2 --retry-connrefused \
+  # Copied out of REPLY immediately: cache_file and write_cache own that global
+  # too, so anything added between here and the curl could otherwise turn the
+  # Idempotency-Key into a cache filename.
+  uuid; rid="$REPLY"
+
+  # --retry covers 5xx, connection failures, and the transient 4xx that curl
+  # recognises (408 and 429). Every other 4xx is sent once and only once, which
+  # is what we want: a 403 will not become a 200.
+  #
+  # --retry-max-time is not optional. --max-time bounds each transfer but not
+  # the sleeps between attempts, and curl obeys Retry-After when retrying — a
+  # routine `Retry-After: 60` would otherwise stall every git fetch for minutes
+  # with no output at all. Measured: 429 + `Retry-After: 45` takes 90s without
+  # it and 0s with it, while a plain 429 still gets its 3 attempts in 3s.
+  resp=$(curl -sS --max-time 10 --retry 2 --retry-max-time 20 --retry-connrefused \
            -w '\n%{http_code}' \
            -H "Authorization: Bearer $6" \
            -H "Content-Type: application/json" \
-           -H "Idempotency-Key: $REPLY" \
+           -H "Idempotency-Key: $rid" \
            -d "$req" "$5/v1/credentials/github" 2>/dev/null)
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
@@ -990,7 +1077,11 @@ fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
       die "this task's credentials do not cover $scope. This is a policy decision and will not change on retry: do not retry it, and do not attempt the same operation against a different repository or remote.${msg:+ ($msg)}"
       ;;
     429) die "the Throng credential service is rate limiting. This is transient — retry the same command." ;;
-    *)   die "the Throng credential service returned HTTP $status. This is transient — retry the same command." ;;
+    5??) die "the Throng credential service returned HTTP $status. This is transient — retry the same command." ;;
+    # Anything else is a 4xx we do not have a specific message for. A 404 is the
+    # likeliest — a mistyped credentials.url, or an API version bump — and it
+    # will never succeed, so it must not be described as worth retrying.
+    *)   die "the Throng credential service returned HTTP $status. This is a configuration or protocol error, not a transient one: retrying will not help." ;;
   esac
 
   username=$(printf '%s' "$body" | jq -r '.username // empty' 2>/dev/null)
@@ -1003,6 +1094,11 @@ fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
 
   exp_epoch=$(iso_to_epoch "$exp_iso") || die "could not parse expires_at '$exp_iso'."
   serve_until=$(( exp_epoch - SKEW ))
+  # A token expiring within SKEW would be written with serve_until already in
+  # the past: write_cache succeeds, read_fresh then rejects the entry it just
+  # wrote, and git_get declines with no output and no reason — indistinguishable
+  # from an unconfigured sandbox, and re-minting on every single operation.
+  [ "$serve_until" -gt "$(now)" ] || die "the credential service returned a token expiring at $exp_iso, too soon to use. Check the sandbox clock."
   write_cache "$1" "$serve_until" "${username:-x-access-token}" "$tok" "$exp_epoch"
 }
 ```
@@ -1024,7 +1120,7 @@ Then replace the `return 1` at the end of `resolve()` with:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npm test --workspace @throng/agent-core -- creds`
-Expected: PASS, 28 tests.
+Expected: PASS, 31 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1135,7 +1231,7 @@ credential() { # $1=key $2=purpose $3=host $4=repo (may be empty)
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npm test --workspace @throng/agent-core -- creds`
-Expected: PASS, 29 tests.
+Expected: PASS, 32 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1264,7 +1360,7 @@ exec "$GH_REAL" "$@"
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `npm test --workspace @throng/agent-core -- creds`
-Expected: PASS, 31 tests.
+Expected: PASS, 34 tests.
 
 - [ ] **Step 5: Commit**
 

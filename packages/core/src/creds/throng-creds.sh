@@ -86,26 +86,44 @@ uuid() {
 
 # GNU date and BSD date disagree on parsing; try both. The API contract
 # specifies ISO-8601 with a Z suffix, which is all we accept.
+#
+# The strict BSD form goes FIRST, and the order is load-bearing. On a BSD that
+# still has `date -d` (FreeBSD, and macOS before it was dropped), `date -u -d
+# "<iso>" +%s` reads the timestamp as a daylight-saving flag and prints the
+# CURRENT epoch with exit 0 — so a leading `-d` attempt would be silently
+# accepted and every token would be dated now. The `-j -f` form cannot be
+# misread: GNU date has no `-j` and simply exits non-zero.
 iso_to_epoch() {
-  date -u -d "$1" +%s 2>/dev/null && return 0
   date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null && return 0
+  date -u -d "$1" +%s 2>/dev/null && return 0
   return 1
 }
 
 fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
-  local req resp rc status body msg username tok exp_iso exp_epoch serve_until scope
+  local req resp rc rid status body msg username tok exp_iso exp_epoch serve_until scope
 
   req=$(jq -nc --arg p "$2" --arg h "$3" --arg r "$4" \
         '{purpose:$p, host:$h} + (if $r == "" then {} else {repo:$r} end)')
 
-  uuid
-  # --retry covers 5xx, timeouts and connection-refused. A 4xx is never retried,
-  # which is what we want: a 403 will not become a 200.
-  resp=$(curl -sS --max-time 10 --retry 2 --retry-connrefused \
+  # Copied out of REPLY immediately: cache_file and write_cache own that global
+  # too, so anything added between here and the curl could otherwise turn the
+  # Idempotency-Key into a cache filename.
+  uuid; rid="$REPLY"
+
+  # --retry covers 5xx, connection failures, and the transient 4xx that curl
+  # recognises (408 and 429). Every other 4xx is sent once and only once, which
+  # is what we want: a 403 will not become a 200.
+  #
+  # --retry-max-time is not optional. --max-time bounds each transfer but not
+  # the sleeps between attempts, and curl obeys Retry-After when retrying — a
+  # routine `Retry-After: 60` would otherwise stall every git fetch for minutes
+  # with no output at all. Measured: 429 + `Retry-After: 45` takes 90s without
+  # it and 0s with it, while a plain 429 still gets its 3 attempts in 3s.
+  resp=$(curl -sS --max-time 10 --retry 2 --retry-max-time 20 --retry-connrefused \
            -w '\n%{http_code}' \
            -H "Authorization: Bearer $6" \
            -H "Content-Type: application/json" \
-           -H "Idempotency-Key: $REPLY" \
+           -H "Idempotency-Key: $rid" \
            -d "$req" "$5/v1/credentials/github" 2>/dev/null)
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
@@ -133,7 +151,11 @@ fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
       die "this task's credentials do not cover $scope. This is a policy decision and will not change on retry: do not retry it, and do not attempt the same operation against a different repository or remote.${msg:+ ($msg)}"
       ;;
     429) die "the Throng credential service is rate limiting. This is transient — retry the same command." ;;
-    *)   die "the Throng credential service returned HTTP $status. This is transient — retry the same command." ;;
+    5??) die "the Throng credential service returned HTTP $status. This is transient — retry the same command." ;;
+    # Anything else is a 4xx we do not have a specific message for. A 404 is the
+    # likeliest — a mistyped credentials.url, or an API version bump — and it
+    # will never succeed, so it must not be described as worth retrying.
+    *)   die "the Throng credential service returned HTTP $status. This is a configuration or protocol error, not a transient one: retrying will not help." ;;
   esac
 
   username=$(printf '%s' "$body" | jq -r '.username // empty' 2>/dev/null)
@@ -146,6 +168,11 @@ fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
 
   exp_epoch=$(iso_to_epoch "$exp_iso") || die "could not parse expires_at '$exp_iso'."
   serve_until=$(( exp_epoch - SKEW ))
+  # A token expiring within SKEW would be written with serve_until already in
+  # the past: write_cache succeeds, read_fresh then rejects the entry it just
+  # wrote, and git_get declines with no output and no reason — indistinguishable
+  # from an unconfigured sandbox, and re-minting on every single operation.
+  [ "$serve_until" -gt "$(now)" ] || die "the credential service returned a token expiring at $exp_iso, too soon to use. Check the sandbox clock."
   write_cache "$1" "$serve_until" "${username:-x-access-token}" "$tok" "$exp_epoch"
 }
 
