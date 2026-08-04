@@ -588,6 +588,94 @@ describe("throng-creds credentials API", () => {
   });
 });
 
+// `git credential erase` does `rm -rf` on whatever THRONG_CREDS_CACHE names, as
+// root in production. `${CACHE_DIR:?}` only catches empty/unset, so the value
+// itself is checked by the modes that touch the cache. These cases are the ones
+// that end a machine.
+describe("throng-creds cache directory guard", () => {
+  const dangerous: Array<[string, string]> = [
+    ["the filesystem root", "/"],
+    ["a bare top-level directory", "/tmp"],
+    ["a top-level directory with a trailing slash", "/tmp/"],
+    ["a relative path", "cache"],
+    ["a path escaping via ..", "/run/throng/../../../etc"],
+    ["a path with a . segment", "/run/./cache"],
+  ];
+
+  it.each(dangerous)("refuses %s on git get", async (_label, value) => {
+    const dir = sandbox();
+    writeConfig(dir, { github_token: "ghp_guarded" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CREDS_CACHE: value },
+    });
+
+    expect(r.code).toBe(1);
+    // The message names the offending value as it was set, and says why.
+    expect(r.stderr).toContain(value);
+    expect(r.stderr).toMatch(/THRONG_CREDS_CACHE|cache directory/);
+    expect(r.stdout).toBe("");
+  });
+
+  // erase is the mode that actually deletes, so it gets its own case. The value
+  // used here is refused for its `..` segment yet resolves back INSIDE the
+  // sandbox — a regression that drops the guard fails this test rather than
+  // running `rm -rf` on the developer's machine.
+  it.each([
+    ["git erase", ["git", "erase"]],
+    ["gh", ["gh"]],
+  ])("refuses a traversing value on %s too", async (_label, args) => {
+    const dir = sandbox();
+    const survivor = join(dir, "cache", "keep-me");
+    mkdirSync(survivor, { recursive: true });
+
+    const r = await run(dir, args, {
+      stdin: "protocol=https\nhost=github.com\n\n",
+      // Built by concatenation, not path.join, which would normalise the `..` away.
+      env: { THRONG_CREDS_CACHE: `${dir}/sub/../cache` },
+    });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("..");
+    expect(existsSync(survivor)).toBe(true);
+  });
+
+  // The exemption is deliberate: git's protocol gives `store` no way to report a
+  // failure, and it reads and writes nothing under the cache. It is also the
+  // Dockerfile's build-time smoke check, which runs with no cache configured.
+  it("still exits 0 for git store with a dangerous value", async () => {
+    const dir = sandbox();
+
+    const r = await run(dir, ["git", "store"], {
+      stdin: "protocol=https\nhost=github.com\nusername=x\npassword=y\n\n",
+      env: { THRONG_CREDS_CACHE: "/" },
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stderr).toBe("");
+  });
+
+  it.each([
+    ["two segments", "cache"],
+    ["a deep path", "a/b/c/cache"],
+    ["a trailing slash on an otherwise fine path", "deep/cache/"],
+  ])("accepts a legitimate value with %s", async (_label, suffix) => {
+    const dir = sandbox();
+    const cache = join(dir, suffix);
+    writeConfig(dir, { github_token: "ghp_legit" });
+
+    const r = await run(dir, ["git", "get"], {
+      stdin: getStdin("acme/app.git"),
+      env: { THRONG_CREDS_CACHE: cache },
+    });
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("password=ghp_legit");
+    expect(r.stderr).toBe("");
+  });
+});
+
 describe("throng-creds single-flight", () => {
   it("makes exactly one API call when several git operations miss at once", async () => {
     const dir = sandbox();
