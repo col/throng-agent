@@ -9,7 +9,7 @@ function deps(over: Partial<BootDeps> = {}): BootDeps {
     clone: vi.fn(async () => ({ ok: true, output: "" })),
     checkout: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
-    injectGitCredentials: vi.fn(() => {}),
+    writeCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
     workspaceRoot: "/workspace",
     ...over,
@@ -77,5 +77,57 @@ describe("TaskRun", () => {
     await tr.initialise(okPayload);
     await settle();
     expect(tr.lifecycle.status().error?.step).toBe("plugins");
+  });
+});
+
+describe("TaskRun credential ordering", () => {
+  // Cloning authenticates through throng-creds, which reads the config file.
+  // If it is written after the clone, every private repo fails to clone.
+  it("writes the credential config before cloning", async () => {
+    const order: string[] = [];
+    const d = deps({
+      writeCredentialConfig: vi.fn(() => void order.push("config")),
+      clone: vi.fn(async () => {
+        order.push("clone");
+        return { ok: true, output: "" };
+      }),
+      runSetupCommands: vi.fn(async () => {
+        order.push("setup");
+        return { ok: true };
+      }),
+    });
+
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+
+    expect(order).toEqual(["config", "clone", "setup"]);
+  });
+
+  it("fails on the credentials step when the config cannot be written", async () => {
+    const d = deps({
+      writeCredentialConfig: vi.fn(() => {
+        throw new Error("EACCES: permission denied, mkdir '/run/throng'");
+      }),
+    });
+
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+
+    const status = tr.lifecycle.status();
+    expect(status.state).toBe("failed");
+    expect(status.error?.step).toBe("credentials");
+    expect(status.error?.message).toContain("EACCES");
+    expect(d.clone).not.toHaveBeenCalled();
+  });
+
+  it("clones without a token argument", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+
+    expect(d.clone).toHaveBeenCalledWith("https://x/y", "/workspace/y");
   });
 });

@@ -4,15 +4,15 @@ import { describeSetupFailure, type SetupResult } from "./bootstrap/setup.js";
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
-import type { FieldError, Manifest, UserIdentity } from "./manifest/types.js";
+import type { BaseManifest, FieldError, Manifest, UserIdentity } from "./manifest/types.js";
 import { validate } from "./manifest/validate.js";
 
 /** Engine-agnostic boot dependencies. */
 export interface BootDeps {
-  clone: (url: string, dest: string, token: string | null) => Promise<GitResult>;
+  clone: (url: string, dest: string) => Promise<GitResult>;
   checkout: (dest: string, ref: string) => Promise<GitResult>;
   runSetupCommands: (cwd: string, commands: string[]) => Promise<SetupResult>;
-  injectGitCredentials: (token: string | null) => void;
+  writeCredentialConfig: (manifest: BaseManifest) => void;
   injectGitIdentity: (identity: UserIdentity) => void;
   workspaceRoot: string;
 }
@@ -57,13 +57,25 @@ export class TaskRun {
 
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
+      // First, and before anything touches the network: cloning authenticates
+      // through throng-creds, which reads this file on every cache miss. There
+      // is no per-invocation credential environment any more.
+      log.info("boot step: writing credential config", {
+        mode: manifest.github_token ? "static" : manifest.credentials ? "api" : "none",
+      });
+      try {
+        this.deps.writeCredentialConfig(manifest);
+      } catch (err) {
+        throw new StepError("credentials", err instanceof Error ? err.message : String(err));
+      }
+
       this.lifecycle.set("cloning");
       log.info("boot step: cloning repos", { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
       let primaryDest = "";
       for (const repo of manifest.repos) {
         const dest = join(this.deps.workspaceRoot, repo.dest);
-        log.info("cloning repo", { url: repo.url, ref: repo.ref, dest, primary: repo.primary, authenticated: repo.token !== null });
-        const cloned = await this.deps.clone(repo.url, dest, repo.token);
+        log.info("cloning repo", { url: repo.url, ref: repo.ref, dest, primary: repo.primary });
+        const cloned = await this.deps.clone(repo.url, dest);
         if (!cloned.ok) {
           throw new StepError("cloning", `git clone failed for ${repo.dest} (exit ${cloned.code}): ${cloned.output.trim()}`);
         }
@@ -76,6 +88,9 @@ export class TaskRun {
       }
 
       this.lifecycle.set("setup");
+      // Setup commands now run WITH working git and gh, because the config
+      // above is already in place. See describeSetupFailure: their output is
+      // redacted before it leaves this process.
       log.info("boot step: running setup commands", { count: manifest.setup_commands.length, cwd: primaryDest });
       const setup = await this.deps.runSetupCommands(primaryDest, manifest.setup_commands);
       if (!setup.ok) {
@@ -85,11 +100,9 @@ export class TaskRun {
         throw new StepError("setup", describeSetupFailure(setup));
       }
 
-      log.info("boot step: injecting credentials and building agent config");
+      log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
-      // GitHub auth (git + gh) and the commit identity reach every subprocess the
-      // engine spawns, via this process's environment.
-      this.deps.injectGitCredentials(manifest.github_token);
+      // Commit identity only. GitHub auth is no longer environment-based.
       this.deps.injectGitIdentity(manifest.user_identity);
 
       const config = adapter.buildAgentConfig(manifest, primaryDest);
