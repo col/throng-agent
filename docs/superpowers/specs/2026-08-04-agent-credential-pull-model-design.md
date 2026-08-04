@@ -110,9 +110,25 @@ default scope.
 The helper is referenced by absolute path because git invokes helpers via
 `/bin/sh` and `/usr/local/bin` may not be on that PATH.
 
-`GIT_TERMINAL_PROMPT=0` continues to be set by the runtime on `process.env` and
-inherited by every child. It is not a credential, so the env-freezing objection
-does not apply to it.
+`GIT_TERMINAL_PROMPT=0` moves into the image as an `ENV`, alongside the git
+config and for the same reason: it is a constant. It used to be set by
+`injectGitCredentials()` on the runtime's `process.env`, where every child
+inherited it — but that function is deleted here, and its replacement in
+`bootstrap/git.ts` passes the variable only in the environment of the runtime's
+own clone and checkout subprocesses. The agent's `git push` an hour later is not
+descended from any of them, so nothing would reach it.
+
+That gap matters. When the helper declines or dies — a 403, an unreachable
+service, an unconfigured sandbox — git falls back to asking for a username.
+Without a TTY that is an immediate error; with one it blocks, and the README's
+standalone recipe reaches into the container over `docker exec`. A blocked git
+operation is the worst outcome this design has. As an `ENV` it reaches every
+process in the sandbox regardless of what spawned it, and it closes the only
+path by which an interactive credential could be typed in.
+
+It is not a credential, so the env-freezing objection that rules out `GH_TOKEN`
+does not apply to it. `bootstrap/git.ts` keeps its per-subprocess copy as well,
+so that module is correct outside the image, where its unit tests run.
 
 ### Boot sequence
 

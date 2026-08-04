@@ -18,7 +18,14 @@ function run(args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv }): P
 
 /**
  * `GIT_TERMINAL_PROMPT=0` turns a missing credential into an immediate error
- * instead of a hang on a TTY that is not there.
+ * instead of a prompt — an error without a TTY, a hang with one.
+ *
+ * This covers only the runtime's OWN subprocesses. The agent's `git push` an
+ * hour later is not descended from this process, so the guarantee that matters
+ * in production is `ENV GIT_TERMINAL_PROMPT=0` in the image, which reaches every
+ * process in the sandbox. This is kept anyway: it costs nothing, it makes the
+ * clone/checkout path correct outside the image (where these unit tests run),
+ * and it does not depend on the Dockerfile to be true.
  */
 const noPrompt = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_TERMINAL_PROMPT: "0" });
 

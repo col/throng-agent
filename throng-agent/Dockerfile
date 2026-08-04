@@ -87,6 +87,20 @@ RUN install -m 0755 /app/packages/core/dist/creds/throng-creds.sh /usr/local/bin
  && throng-creds git store </dev/null \
  && gh --version \
  && rm -rf /run/throng
+# Part of the same constant as the git config above, and it belongs in the image
+# for the same reason. When throng-creds declines or dies — a 403, an unreachable
+# service, an unconfigured sandbox — git falls back to asking for a username.
+# Without a TTY that is an immediate error; WITH one it blocks forever, and the
+# README's standalone recipe reaches in over `docker exec`. A blocked git
+# operation is the worst outcome this design has, so the prompt is disabled
+# process-wide rather than per-subprocess.
+#
+# ENV, not the runtime's process.env: the runtime used to set it during boot and
+# every child inherited it, but the agent's own `git push` an hour later is not a
+# child of any boot-time process. Set here it reaches every process in the
+# sandbox, whatever spawned it. It also removes the only path by which an
+# interactive credential could be typed in.
+ENV GIT_TERMINAL_PROMPT=0
 ENV CONTROL_PORT=8080
 # node:20-slim (Debian 12) sets no LANG, so every process in the sandbox inherits
 # the `C` locale. That makes locale-sensitive toolchains misbehave on non-ASCII
