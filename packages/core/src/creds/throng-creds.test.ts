@@ -613,7 +613,7 @@ describe("throng-creds single-flight", () => {
 
   // `mkdir` fails for reasons other than contention, and waiting fixes none of
   // them. Without that distinction this decline costs the full LOCK_TICKS —
-  // measured at 17s against the 0.02s asserted here.
+  // 2s at the tick count below, and 17s at the production one.
   it("declines promptly when the cache directory cannot be created", async () => {
     const dir = sandbox();
     // A regular file where a directory must go: `mkdir -p` fails with ENOTDIR
@@ -687,22 +687,33 @@ describe("throng-creds single-flight", () => {
   // Making LOCK_TICKS overridable put a hang one typo away: `[ "$ticks" -ge abc ]`
   // errors on every iteration, so the timeout branch never fires and the wait
   // runs forever, stalling the git operation that invoked the helper. Measured
-  // before the guard existed: still spinning after 6s, one bash error per tick.
+  // before the guard existed: still spinning at 12s, one bash error per tick.
   //
-  // Asserted through the warning rather than by holding a lock and timing the
-  // wait, because the fallback IS the 15s production value — proving it that way
-  // would cost the suite the 15s this override exists to avoid. The warning is
-  // emitted by the same two-line branch that assigns the fallback.
-  it("warns and falls back to the production wait on a junk tick count", async () => {
+  // Both cases below reach that same failure. "99999999999999999999" is the
+  // non-obvious one: it is all digits, so a digit-only check waves it through
+  // and `[` then fails to parse it into a C integer, producing byte-for-byte the
+  // hang the guard exists to prevent.
+  //
+  // SCOPE, deliberately: this asserts the warning, not the fallback value. No
+  // lock is held, so the wait loop is never entered — delete the `LOCK_TICKS=75`
+  // line from the guard and this still passes. Proving the fallback directly
+  // means holding a lock and waiting out the fallback, and the fallback IS the
+  // 15s production value, so that costs the suite the 15s this override exists
+  // to remove. Judged not worth it: LOCK_TICKS has no production consumer, and
+  // the blast radius is the developer who mistyped it, who finds out at once.
+  it.each([
+    ["non-numeric", "abc"],
+    ["overflowing", "99999999999999999999"],
+  ])("warns and recovers from a %s tick count", async (_label, ticks) => {
     const dir = sandbox();
     writeConfig(dir, { github_token: "ghp_junktick" });
 
     const r = await run(dir, ["git", "get"], {
       stdin: getStdin("acme/app.git"),
-      env: { THRONG_CREDS_LOCK_TICKS: "abc" },
+      env: { THRONG_CREDS_LOCK_TICKS: ticks },
     });
 
-    expect(r.stderr).toContain("non-numeric THRONG_CREDS_LOCK_TICKS");
+    expect(r.stderr).toContain("unusable THRONG_CREDS_LOCK_TICKS");
     expect(r.stdout).toContain("password=ghp_junktick");
   });
 });
@@ -722,18 +733,28 @@ function fakeGh(dir: string): string {
   return path;
 }
 
-function runShim(dir: string, args: string[]): Promise<RunResult> {
+function runShim(
+  dir: string,
+  args: string[],
+  opts: { env?: Record<string, string> } = {},
+): Promise<RunResult> {
+  // GH_TOKEN is dropped rather than inherited. A developer or CI runner with one
+  // exported would otherwise fail the decline test *and print their token into
+  // the test output*; tests that care about an inherited value set it back
+  // explicitly through opts.env.
+  const { GH_TOKEN: _inherited, ...clean } = process.env;
   return new Promise((resolve) => {
     const child = execFile(
       "bash",
       [SHIM, ...args],
       {
         env: {
-          ...process.env,
+          ...clean,
           THRONG_CONFIG: join(dir, "config.json"),
           THRONG_CREDS_CACHE: join(dir, "cache"),
           THRONG_CREDS_BIN: `bash ${SCRIPT}`,
           GH_REAL_BIN: fakeGh(dir),
+          ...opts.env,
         },
       },
       (err, stdout, stderr) => {
@@ -763,5 +784,33 @@ describe("gh shim", () => {
     const r = await runShim(dir, ["pr", "list"]);
 
     expect(r.stdout).toContain("GH_TOKEN=<unset>");
+  });
+
+  // Not setting GH_TOKEN is not the same as it being absent. Boot-time injection
+  // still exports one, so on a decline the shim would hand gh a stale token —
+  // silently, on exactly the path documented to produce a clean "not logged in".
+  // The decline has to be correct without assuming a clean environment.
+  it("unsets an inherited GH_TOKEN when throng-creds declines", async () => {
+    const dir = sandbox();
+
+    const r = await runShim(dir, ["pr", "list"], {
+      env: { GH_TOKEN: "ghp_stale_from_boot" },
+    });
+
+    expect(r.stdout).toContain("GH_TOKEN=<unset>");
+    expect(r.stdout).not.toContain("ghp_stale_from_boot");
+  });
+
+  // The fresh token must win over an inherited one too, rather than the
+  // environment shadowing what throng-creds just minted.
+  it("overrides an inherited GH_TOKEN with the freshly fetched one", async () => {
+    const dir = sandbox();
+    writeConfig(dir, { github_token: "ghp_fresh" });
+
+    const r = await runShim(dir, ["pr", "list"], {
+      env: { GH_TOKEN: "ghp_stale_from_boot" },
+    });
+
+    expect(r.stdout).toContain("GH_TOKEN=ghp_fresh");
   });
 });

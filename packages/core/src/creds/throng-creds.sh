@@ -35,13 +35,20 @@ die()  { warn "$*"; exit 1; }
 now()  { date +%s; }
 
 # Validated here rather than beside the assignment above only because `warn`
-# does not exist yet up there. A non-numeric LOCK_TICKS does not merely mistime
-# the wait: `[ "$ticks" -ge "$LOCK_TICKS" ]` errors on every iteration, so the
+# does not exist yet up there. An unusable LOCK_TICKS does not merely mistime the
+# wait: `[ "$ticks" -ge "$LOCK_TICKS" ]` errors on every iteration, so the
 # timeout branch is never reached and the loop waits forever — the worst failure
 # mode a credential helper has, since it stalls the git operation that called it.
+#
+# `??????*` is not redundant with the digit check. Digits alone are not enough:
+# `[` parses base 10 into a C integer, so 99999999999999999999 passes
+# `*[!0-9]*` and then produces exactly the same per-tick error and the same
+# hang. Six digits is the cutoff because 99999 ticks is already 5.5 hours, far
+# past any value worth honouring. (Unlike `(( ))`, `[` does not read a leading
+# zero as octal, so "08" and "0000" are genuinely fine.)
 case "$LOCK_TICKS" in
-  ''|*[!0-9]*)
-    warn "ignoring non-numeric THRONG_CREDS_LOCK_TICKS '$LOCK_TICKS'"
+  ''|*[!0-9]*|??????*)
+    warn "ignoring unusable THRONG_CREDS_LOCK_TICKS '$LOCK_TICKS'"
     LOCK_TICKS=75 ;;
 esac
 
@@ -56,7 +63,7 @@ esac
 # must exit 0 whatever the environment says: git's protocol gives it no way to
 # report a failure, and it reads and writes nothing here.
 check_cache_dir() {
-  CACHE_DIR_RAW="$CACHE_DIR"        # quote back what was set, not the normalised form
+  local CACHE_DIR_RAW="$CACHE_DIR"  # quote back what was set, not the normalised form
   # Trailing slashes go first: "/cache/" has the same parent as "/run/cache" and
   # would otherwise walk straight past the depth check below.
   while [ "$CACHE_DIR" != "/" ] && [ "$CACHE_DIR" != "${CACHE_DIR%/}" ]; do

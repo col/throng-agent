@@ -24,7 +24,14 @@ TOKEN=$($CREDS_BIN gh)
 # one: gh then reports that it is not logged in, which is the actual problem,
 # instead of an auth rejection that misdirects. throng-creds has already
 # explained itself on stderr.
+#
+# `env -u` rather than a bare exec, because not setting GH_TOKEN is not the same
+# as it being absent: anything that exported one into this process — a boot-time
+# injection, a developer's shell — would otherwise be inherited, and a stale
+# token would silently win on precisely the path documented to produce a clean
+# "not logged in". The decline must not depend on the environment already being
+# clean. `-u` is in both macOS and GNU coreutils env.
 if [ -n "$TOKEN" ]; then
   exec env GH_TOKEN="$TOKEN" "$GH_REAL" "$@"
 fi
-exec "$GH_REAL" "$@"
+exec env -u GH_TOKEN "$GH_REAL" "$@"
