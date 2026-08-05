@@ -95,22 +95,39 @@ export function resolveAuth(
  * Safe to call during initialise because the wrappers snapshot `process.env`
  * per query, long after this has run.
  *
- * A null `auth` scrubs nothing: nothing was selected, so nothing is claimed and
- * whatever the operator put in the environment is left as they left it.
+ * `alsoScrub` names a credential the SDK will honour but that Throng does not
+ * accept as an `agent.auth` input, so it is cleared unconditionally — even when
+ * `auth` is null. A null `auth` leaves the *scheme* variables alone: whatever
+ * `resolveAuth` produced it from is, by construction, exactly why nothing was
+ * selected, so none of them can be set; and for a hand-built null, a credential
+ * Throng didn't choose isn't Throng's to delete.
+ *
+ * An unregistered type throws before any mutation — including the `alsoScrub`
+ * clear — so a programmer error leaves the environment exactly as it found it
+ * rather than half-scrubbed.
  */
 export function applyAuth(
   auth: ResolvedAuth | null,
   schemes: AuthScheme[],
   alsoScrub: string[] = [],
 ): void {
-  if (auth === null) return;
-  const selected = schemes.find((s) => s.type === auth.type);
-  if (!selected) {
-    throw new Error(`no auth scheme is registered for type '${auth.type}'`);
+  let selected: AuthScheme | undefined;
+  if (auth !== null) {
+    selected = schemes.find((s) => s.type === auth.type);
+    if (!selected) {
+      throw new Error(`no auth scheme is registered for type '${auth.type}'`);
+    }
   }
+
+  // Never a legitimate input in any mode, so it goes whether or not anything
+  // was selected.
+  for (const name of alsoScrub) delete process.env[name];
+
+  if (auth === null || !selected) return;
+
   // Scrub every candidate including the selected one, then set — so the result
   // is correct even if a scrub name ever collided with the injection target.
-  for (const name of [...schemes.map((s) => s.env), ...alsoScrub]) {
+  for (const name of schemes.map((s) => s.env)) {
     delete process.env[name];
   }
   process.env[selected.env] = auth.token;

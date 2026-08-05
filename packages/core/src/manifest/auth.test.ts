@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyAuth, resolveAuth, type AuthResolution, type AuthScheme } from "./auth.js";
 
 const SCHEMES: AuthScheme[] = [
@@ -99,12 +99,19 @@ describe("resolveAuth", () => {
   });
 });
 
-const CREDENTIAL_VARS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 const ALSO_SCRUB = ["ANTHROPIC_AUTH_TOKEN"];
+// Derived, not hand-maintained, so it can't drift from what applyAuth actually touches.
+const CREDENTIAL_VARS = [...SCHEMES.map((s) => s.env), ...ALSO_SCRUB];
 
 describe("applyAuth", () => {
-  // applyAuth deletes keys, not just sets them, so the whole set is restored.
-  const saved = Object.fromEntries(CREDENTIAL_VARS.map((n) => [n, process.env[n]]));
+  // applyAuth deletes keys, not just sets them, so each test starts from a clean
+  // slate (a leaked deletion would otherwise leak as a silent absence into
+  // whichever file vitest's worker runs next) and the whole set is restored.
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(CREDENTIAL_VARS.map((n) => [n, process.env[n]]));
+    for (const n of CREDENTIAL_VARS) delete process.env[n];
+  });
   afterEach(() => {
     for (const n of CREDENTIAL_VARS) {
       const v = saved[n];
@@ -144,12 +151,29 @@ describe("applyAuth", () => {
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ambient");
   });
 
-  it("defaults alsoScrub to empty", () => {
-    applyAuth({ type: "api_key", token: "sk-1" }, SCHEMES);
+  it("clears an alsoScrub variable even when nothing was resolved", () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "at-ambient";
+    applyAuth(null, SCHEMES, ALSO_SCRUB);
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  it("leaves the environment untouched when the type has no scheme", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ambient";
+    process.env.ANTHROPIC_AUTH_TOKEN = "at-ambient";
+    expect(() => applyAuth({ type: "nope", token: "x" }, SCHEMES, ALSO_SCRUB)).toThrow(/nope/);
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-ambient");
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("at-ambient");
+  });
+
+  it("sets the selected variable even when it is also named in alsoScrub", () => {
+    applyAuth({ type: "api_key", token: "sk-1" }, SCHEMES, ["ANTHROPIC_API_KEY"]);
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-1");
   });
 
-  it("throws when the type has no scheme in the table", () => {
-    expect(() => applyAuth({ type: "nope", token: "x" }, SCHEMES)).toThrow(/nope/);
+  it("defaults alsoScrub to empty", () => {
+    process.env.ANTHROPIC_AUTH_TOKEN = "at-ambient";
+    applyAuth({ type: "api_key", token: "sk-1" }, SCHEMES);
+    expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe("at-ambient"); // the actual claim
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-1");
   });
 });
