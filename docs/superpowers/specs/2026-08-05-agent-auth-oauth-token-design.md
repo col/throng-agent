@@ -173,7 +173,22 @@ convention for "was this sent?" (`github_token`, `UserIdentity` fields).
 - when `auth` is non-null: `process.env[selected.env] = auth.token`, and
   `delete process.env[s.env]` for every other `s` in `schemes`, plus every name
   in `alsoScrub`;
-- when `auth` is `null`: scrub nothing, set nothing.
+- when `auth` is `null`: scrub `alsoScrub` anyway, set nothing.
+
+The `null` case is not "do nothing", and the difference matters. If `resolveAuth`
+returned `null` then, by construction, no `schemes[].env` variable was set —
+otherwise it would have selected one. So skipping the scheme scrub costs nothing.
+The *only* thing a blanket early return would preserve is the `alsoScrub` set —
+exactly the set defined as "a credential the SDK honours but Throng does not
+accept as an input". A sandbox with an ambient `ANTHROPIC_AUTH_TOKEN` and a
+manifest carrying no `auth` would otherwise log "no credential, requests will
+fail" and then bill a run to an account nobody chose: the precise silent-billing
+outcome this feature exists to prevent, surviving in the one case not covered.
+
+The scheme variables are still left alone when nothing was resolved. They are
+provably unset for any credential that came from `resolveAuth`, and for a
+hand-built `null` the conservative reading is that a credential Throng did not
+choose is also not Throng's to delete.
 
 Scrubbing is what makes the billing mode a guarantee rather than a bet on Claude
 Code's internal precedence between `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`
@@ -239,7 +254,13 @@ cannot drift apart.
   missing `token`, non-string `token`, blank/whitespace `token`;
 - `applyAuth` sets the selected var **and** asserts the *absence* of every other
   scheme var and every `alsoScrub` name that was set beforehand;
-- `applyAuth(null, …)` leaves a pre-existing env var untouched.
+- `applyAuth` still sets the selected var when that same name also appears in
+  `alsoScrub` — the documented scrub-then-set ordering, otherwise pinned only by
+  code review;
+- an unregistered type throws **and** leaves the environment unmodified, so a bad
+  type cannot strip a run's ambient credential and then give it nothing;
+- `applyAuth(null, …)` leaves a pre-existing scheme var untouched but still
+  clears `alsoScrub`.
 
 **Claude — `src/manifest/claude-agent.test.ts`**
 - `type: "oauth"` and `type: "api_key"` both accepted;
