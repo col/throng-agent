@@ -12,8 +12,11 @@ describe("validateCodexAgent", () => {
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent")).toBe(true);
   });
 
-  it("resolves an api_key auth block", () => {
-    const r = validateCodexAgent({ agent: { auth: { type: "api_key", token: "sk-in" } } }, {});
+  it("resolves an api_key auth block, short-circuiting the environment", () => {
+    const r = validateCodexAgent(
+      { agent: { auth: { type: "api_key", token: "sk-in" } } },
+      { OPENAI_API_KEY: "sk-env" },
+    );
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.agent.auth).toEqual({ type: "api_key", token: "sk-in" });
   });

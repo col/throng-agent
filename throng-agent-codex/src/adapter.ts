@@ -15,7 +15,9 @@ export class CodexEngineAdapter
   injectCredentials(manifest: Manifest<ResolvedCodexAgent>): void {
     applyAuth(manifest.agent.auth, CODEX_AUTH_SCHEMES);
     if (manifest.agent.auth === null) {
-      log.warn("no agent.auth in manifest; agent requests will fail unless another auth path is configured");
+      log.warn(
+        "no credential resolved from agent.auth or the environment; agent requests will fail unless another auth path is configured",
+      );
     }
   }
 

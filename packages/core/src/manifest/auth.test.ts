@@ -145,6 +145,12 @@ describe("applyAuth", () => {
     expect(process.env.ANTHROPIC_API_KEY).toBe("sk-1");
   });
 
+  it("overwrites an ambient value already in the selected variable", () => {
+    process.env.ANTHROPIC_API_KEY = "sk-ambient";
+    applyAuth({ type: "api_key", token: "sk-1" }, SCHEMES, ALSO_SCRUB);
+    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-1");
+  });
+
   it("leaves the environment untouched when nothing was resolved", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ambient";
     applyAuth(null, SCHEMES, ALSO_SCRUB);

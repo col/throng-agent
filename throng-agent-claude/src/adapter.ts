@@ -24,7 +24,9 @@ export class ClaudeEngineAdapter
     assertNoAnthropicCredentialInSettings();
     applyAuth(manifest.agent.auth, CLAUDE_AUTH_SCHEMES, CLAUDE_AUTH_ALSO_SCRUB);
     if (manifest.agent.auth === null) {
-      log.warn("no agent.auth in manifest; agent requests will fail unless another auth path is configured");
+      log.warn(
+        "no credential resolved from agent.auth or the environment; agent requests will fail unless another auth path is configured",
+      );
     }
     const { marketplaces, local, unpinned, enabledPlugins } = manifest.agent.plugins;
     const marketplaceCount = Object.keys(marketplaces).length;
