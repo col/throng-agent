@@ -219,7 +219,13 @@ Plugin logging below it is unchanged.
 The same three edits, minus the settings guard (Anthropic-specific) and with a
 single-entry table: `ResolvedCodexAgent.api_key` → `auth`, `resolveAuth` in the
 validator, `injectOpenAIKey` deleted in favour of `applyAuth`, warning reworded.
-`src/config/credentials.ts` is left holding nothing and is deleted.
+
+`src/config/credentials.ts` keeps its place in both adapters but changes role:
+the injector goes, and the file becomes the home of that engine's scheme table
+(`CODEX_AUTH_SCHEMES`; `CLAUDE_AUTH_SCHEMES` plus `CLAUDE_AUTH_ALSO_SCRUB` and
+the settings guard, which derives its list of forbidden pins from them). The
+adapter imports the table rather than declaring it, so the guard and the table
+cannot drift apart.
 
 ### 4. Tests
 
