@@ -69,8 +69,11 @@ The single credential the engine runs under, tagged with its own type:
 `type` it does not accept — `codex` with `oauth` is a `400` on `agent.auth.type`.
 Both fields are required and `token` must be non-blank; there is no coercion of a
 blank token to "absent", because silently switching billing mode is exactly the
-failure this shape exists to prevent. The token is trimmed before use, on both
-the manifest and the env-fallback path below, so a copy-pasted trailing newline
+failure this shape exists to prevent. An invalid `auth` block is a `400` and
+never falls back to the environment — a caller who stated an intent and got it
+wrong sees the error, rather than a different billing mode being silently
+substituted underneath them. The token is trimmed before use, on both the
+manifest and the env-fallback path below, so a copy-pasted trailing newline
 never reaches the SDK's environment.
 
 `auth` may be omitted, in which case the credential falls back to the
@@ -79,36 +82,49 @@ environment: `CLAUDE_CODE_OAUTH_TOKEN` then `ANTHROPIC_API_KEY` for claude,
 already an odd configuration, and exporting an OAuth token is an unambiguous
 request for subscription billing. As with the other env fallbacks, this is a
 standalone-`docker run` convenience: under E2B the runtime is resumed with a
-scrubbed environment.
+scrubbed environment. If `auth` is omitted and nothing is set in the environment
+either, that is not an error: boot proceeds, and the run logs a warning that
+requests will fail unless another auth path is configured.
 
-**Selecting a type clears the others.** The Agent SDK reads its credential off
-the process environment and the A2A wrappers hand it a copy of `process.env`, so
-an `ANTHROPIC_API_KEY` that is merely ambient in the sandbox — baked into the
-image, passed with a host `-e`, left by an earlier configuration — would reach
-Claude Code even though the manifest asked for OAuth, and the run would silently
-bill API credits. Whichever type is selected, `ANTHROPIC_API_KEY`,
+**For claude, selecting a type clears the others.** The Agent SDK reads its
+credential off the process environment and the A2A wrappers hand it a copy of
+`process.env`, so an `ANTHROPIC_API_KEY` that is merely ambient in the sandbox —
+baked into the image, passed with a host `-e`, left by an earlier configuration
+— would reach Claude Code even though the manifest asked for OAuth, and the run
+would silently bill API credits. Whichever type is selected, `ANTHROPIC_API_KEY`,
 `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` are all removed from the
 environment before the winner is set, so the billing mode is a guarantee rather
 than a bet on the engine's internal precedence. When nothing is resolved at all
 — no `auth` block and nothing set in the environment — the scheme variables are
-left alone (there is nothing to leave alone: provably none of them was set), but
-`ANTHROPIC_AUTH_TOKEN` is still scrubbed unconditionally, since it is never a
-legitimate credential source and an ambient copy of it must not survive into the
-run regardless of what, if anything, was selected.
+left untouched: none of them held a non-blank value, so none of them are
+cleared, and an ambient `ANTHROPIC_API_KEY` survives. `ANTHROPIC_AUTH_TOKEN` is
+the exception: it is never a legitimate credential source, so it is scrubbed
+regardless of whether a type was selected. Codex has no such extra variable and
+a single-entry scheme table, so under codex only `OPENAI_API_KEY` is ever
+touched, and nothing at all is scrubbed when nothing resolves.
 
-A `~/.claude/settings.json` that *mentions* `ANTHROPIC_API_KEY`,
-`ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` in its `env` block is a hard
-boot error, checking key presence rather than truthiness — a settings `env`
-block replaces the inherited variable rather than merging with it, so even
-`{ "ANTHROPIC_API_KEY": "" }` erases the credential just set and reads to Claude
-Code as unset, letting it fall through to the next rung of its own precedence
-exactly as a deleted variable would. A top-level `apiKeyHelper` is rejected for
-the same reason: it outranks `CLAUDE_CODE_OAUTH_TOKEN` in Claude Code's own
-precedence, and it survives the environment scrub above because it isn't an
-environment variable at all.
+Before any of that runs, a `~/.claude/settings.json` that *mentions*
+`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` in its
+`env` block is a hard boot error, checking key presence rather than truthiness —
+a settings `env` block replaces the inherited variable rather than merging with
+it, so even `{ "ANTHROPIC_API_KEY": "" }` would erase the credential about to be
+set and read to Claude Code as unset, letting it fall through to the next rung
+of its own precedence exactly as a deleted variable would. A top-level
+`apiKeyHelper` is rejected too — checked by truthiness, so `""` passes — because
+it outranks `CLAUDE_CODE_OAUTH_TOKEN` in Claude Code's own precedence and
+survives the scrub above, since it isn't an environment variable at all.
 
-`agent.api_key` was the previous form and is **gone**, not deprecated — a
-manifest still sending it resolves no credential at all.
+`agent.api_key` was the previous form and is **gone**, not deprecated.
+`resolveAuth` branches only on `agent.auth`, so a manifest still sending
+`api_key` has it neither read nor rejected — it is ignored entirely. The
+credential still falls through to the environment, then to none, exactly as if
+`auth` were absent: nothing fails, and boot proceeds with the same warning
+described above. That fallback is the hazard, not a safety net: under a
+`docker run` carrying an ambient `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`,
+a stale `api_key` manifest resolves a credential from whichever variable is set
+— potentially in a different billing mode than the one the stale field named —
+with nothing to flag that the field was ignored. Update any manifest still using
+it.
 
 ### `thinking` and `effort` (claude)
 
