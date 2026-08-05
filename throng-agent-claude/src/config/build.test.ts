@@ -13,7 +13,7 @@ const manifest = (
   user_identity: { name: null, email: null },
   setup_commands: [],
   platform: "claude",
-  agent: { keys, plugins, api_key: null },
+  agent: { keys, plugins, auth: null },
 });
 
 /** Resolves a manifest `agent.plugins` list, failing the test if invalid. */

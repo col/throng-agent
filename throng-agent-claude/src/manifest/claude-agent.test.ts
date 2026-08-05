@@ -13,27 +13,50 @@ describe("validateClaudeAgent", () => {
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.permission_mode")).toBe(true);
   });
 
-  it("resolves api_key from agent.api_key", () => {
-    const r = validateClaudeAgent({ agent: { api_key: "sk-in" } }, {});
+  it("resolves an oauth auth block", () => {
+    const r = validateClaudeAgent({ agent: { auth: { type: "oauth", token: "oat-1" } } }, {});
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.api_key).toBe("sk-in");
+    if (r.ok) expect(r.agent.auth).toEqual({ type: "oauth", token: "oat-1" });
   });
 
-  it("falls back to ANTHROPIC_API_KEY when agent.api_key is absent", () => {
-    const r = validateClaudeAgent({ agent: {} }, { ANTHROPIC_API_KEY: "sk-env" });
+  it("resolves an api_key auth block", () => {
+    const r = validateClaudeAgent({ agent: { auth: { type: "api_key", token: "sk-1" } } }, {});
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.api_key).toBe("sk-env");
+    if (r.ok) expect(r.agent.auth).toEqual({ type: "api_key", token: "sk-1" });
   });
 
-  it("rejects a non-string agent.api_key", () => {
-    const r = validateClaudeAgent({ agent: { api_key: 5 } }, {});
+  it("falls back to CLAUDE_CODE_OAUTH_TOKEN ahead of ANTHROPIC_API_KEY", () => {
+    const r = validateClaudeAgent({ agent: {} }, {
+      CLAUDE_CODE_OAUTH_TOKEN: "oat-env",
+      ANTHROPIC_API_KEY: "sk-env",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.agent.auth).toEqual({ type: "oauth", token: "oat-env" });
+  });
+
+  it("resolves no auth when neither the manifest nor the env carries one", () => {
+    const r = validateClaudeAgent({ agent: {} }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.agent.auth).toBe(null);
+  });
+
+  it("rejects an auth type the engine does not accept", () => {
+    const r = validateClaudeAgent({ agent: { auth: { type: "chatgpt", token: "x" } } }, {});
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.api_key")).toBe(true);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.auth.type")).toBe(true);
+  });
+
+  it("reports an auth error alongside an unrelated agent error in one result", () => {
+    const r = validateClaudeAgent({ agent: { auth: { type: "oauth" }, effort: "nope" } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors.map((e) => e.field).sort()).toEqual(["agent.auth.token", "agent.effort"]);
+    }
   });
 
   it("resolves plugins into channels", () => {
     const r = validateClaudeAgent(
-      { agent: { plugins: [{ path: "/opt/p" }], api_key: "sk" } },
+      { agent: { plugins: [{ path: "/opt/p" }], auth: { type: "api_key", token: "sk" } } },
       {},
     );
     expect(r.ok).toBe(true);

@@ -1,11 +1,10 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { resolveAuth } from "@throng/agent-core";
 import {
   assertNoAnthropicCredentialInSettings,
-  injectAnthropicKey,
   CLAUDE_AUTH_ALSO_SCRUB,
   CLAUDE_AUTH_SCHEMES,
 } from "./credentials.js";
@@ -21,10 +20,6 @@ const settingsFile = (contents: Record<string, unknown>) => {
 
 /** Writes a settings.json with the given `env` block and returns its path. */
 const settingsWith = (env: Record<string, unknown>) => settingsFile({ env });
-
-afterEach(() => {
-  delete process.env.ANTHROPIC_API_KEY;
-});
 
 describe("CLAUDE_AUTH_SCHEMES", () => {
   it("lists oauth before api_key, so an exported OAuth token wins the env tier", () => {
@@ -42,18 +37,6 @@ describe("CLAUDE_AUTH_SCHEMES", () => {
   it("has a unique type per scheme", () => {
     const types = CLAUDE_AUTH_SCHEMES.map((s) => s.type);
     expect(new Set(types).size).toBe(types.length);
-  });
-});
-
-describe("injectAnthropicKey", () => {
-  it("sets process.env when a key is given", () => {
-    injectAnthropicKey("sk-test");
-    expect(process.env.ANTHROPIC_API_KEY).toBe("sk-test");
-  });
-
-  it("leaves env untouched when key is null", () => {
-    injectAnthropicKey(null);
-    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 });
 

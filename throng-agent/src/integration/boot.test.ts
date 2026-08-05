@@ -22,7 +22,11 @@ describe("throng-agent boot routing", () => {
     const tr = new TaskRun(fakeDeps(), createRegistry());
     const res = await tr.initialise({
       repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: true }],
-      agent: { platform: "claude", api_key: "sk-test", permission_mode: "plan" },
+      agent: {
+        platform: "claude",
+        auth: { type: "api_key", token: "sk-test" },
+        permission_mode: "plan",
+      },
     });
     expect(res).toEqual({ ok: true, status: "booting" });
     // Boot invokes the real ClaudeEngineAdapter.createA2AServer (@col/a2a-claude).
