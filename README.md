@@ -66,14 +66,16 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
 
 - **`credentials`** is how the agent gets GitHub tokens in production. `git` uses
   a credential helper and `gh` is wrapped by a shim; both call `throng-creds`,
-  which POSTs to `<url>/v1/credentials/github` with `token` as its bearer
-  identity and gets back a short-lived, repo-scoped installation token. Nothing
+  which POSTs to `url` — the complete endpoint, used verbatim — with `token` as
+  its bearer identity and gets back a short-lived, repo-scoped installation
+  token. The path lives control-plane-side, so an API version bump needs no
+  change to the sandbox image. Nothing
   is cached beyond its expiry, and no GitHub credential is ever placed in the
   process environment — an environment is fixed at `execve()`, so a token put
   there at boot could never be refreshed, which is what broke long-running and
   paused tasks. `url` must start with `https://` and must not end in a trailing
-  slash (the helper appends the path to it verbatim); both are rejected at
-  validation as `credentials.url`.
+  slash (it is sent exactly as given, and a trailing slash is a different route);
+  both are rejected at validation as `credentials.url`.
 - **`github_token`** is a literal token, and **takes precedence over
   `credentials`** when both are present. It exists so the image can be run
   standalone, without the Throng platform. It is honoured inside `throng-creds`

@@ -38,7 +38,11 @@ version passed a `docker run` check and did nothing in production. `buildServer`
 instead of `startControlServer(...)` must set the variable itself.
 
 The initialise manifest gains an optional `credentials: { url, token }` block naming the credentials
-API. `github_token` is unchanged, still falls back to the `GITHUB_TOKEN` env var, and now wins over
+API. `url` is the **complete endpoint URL** and is POSTed to verbatim — the helper appends no path of
+its own — so the control plane owns its own routing and can move or version the endpoint without a
+rebuild of the sandbox image. It must be `https://` and must not end in a trailing slash; both are
+rejected at initialise as `credentials.url`.
+`github_token` is unchanged, still falls back to the `GITHUB_TOKEN` env var, and now wins over
 `credentials` when both are present — honoured inside the helper rather than by a second code path,
 so a standalone `docker run` exercises the production wiring.
 

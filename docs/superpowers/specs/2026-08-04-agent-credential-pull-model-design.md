@@ -350,7 +350,7 @@ On a cache miss, under the lock:
    `password_expiry_utc` set to `now + 10y`. No HTTP, ever. The far-future
    expiry means a standalone sandbox takes the slow path exactly once per key
    for its whole life, and every call after that is a fast-path hit.
-3. `credentials` present → `POST /v1/credentials/github`.
+3. `credentials` present → `POST` to `credentials.url` as given.
 4. Neither → decline.
 
 Step 2 before step 3 is the static-token precedence rule.
@@ -463,13 +463,15 @@ what makes a bare `docker run` work.
 `credentials` must be an object with non-blank string `url` and `token`. Both
 fields are required when the block is present: a half-configured helper would
 fail at the first clone rather than at initialise, which is much harder to
-diagnose. `url` must additionally start with `https://` — the endpoint hands
-back live GitHub and control-plane tokens, so it is never appropriate in the
-clear — and must not end in a trailing slash, because `throng-creds`
-concatenates it raw into `"$url/v1/credentials/github"` and the resulting double
-slash 404s on most servers rather than being rejected outright. Rejecting at
-initialise, where the operator gets a precise field error, beats normalising and
-hoping the result still matches what the control plane serves. Errors are
+diagnose. `url` is the **complete endpoint URL**, POSTed to verbatim —
+`throng-creds` appends no path of its own, so the control plane owns its own
+routing and an API version bump needs no rebuild of the sandbox image. It must
+additionally start with `https://` — the endpoint hands back live GitHub and
+control-plane tokens, so it is never appropriate in the clear — and must not end
+in a trailing slash, since a trailing slash is a distinct route that most servers
+404 rather than reject outright. Rejecting at initialise, where the operator gets
+a precise field error, beats normalising and hoping the result still matches what
+the control plane serves. Errors are
 reported as `credentials.url` and `credentials.token`, matching the existing
 `FieldError` convention.
 
@@ -573,8 +575,12 @@ single `case` arm.
 Specified here because the sandbox is its consumer and this is the artefact
 hardest to change later. Implemented separately in the control plane.
 
+The sandbox does not construct this path — it POSTs to `credentials.url`
+verbatim, and the route below is what the control plane chooses to publish there
+(today, under an `/api/v1` scope).
+
 ```
-POST /v1/credentials/github
+POST <credentials.url>
 Authorization: Bearer <task token>
 Idempotency-Key: <uuid>
 

@@ -340,7 +340,7 @@ interface Stub {
   close: () => Promise<void>;
 }
 
-/** A stand-in for POST /v1/credentials/github. `reply` decides each response. */
+/** A stand-in for the credentials endpoint. `reply` decides each response. */
 async function stubApi(
   reply: (n: number) => { status: number; body: unknown },
 ): Promise<Stub> {
@@ -351,7 +351,7 @@ async function stubApi(
     req.on("end", () => {
       requests.push({
         // The stub answers any method on any path, so the method and URL are
-        // recorded and asserted rather than assumed: POST /v1/credentials/github
+        // recorded and asserted rather than assumed: which URL gets POSTed to
         // is the hardest part of this contract to change later.
         method: req.method,
         path: req.url,
@@ -368,7 +368,14 @@ async function stubApi(
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
   return {
-    url: `http://127.0.0.1:${port}`,
+    // The full endpoint, not an origin: `credentials.url` IS the URL the helper
+    // POSTs to, and the helper appends nothing to it. The `/api` prefix mirrors
+    // what the control plane actually serves (`scope "/api/v1"`), and it is what
+    // makes an appending regression visible rather than merely wrong — a helper
+    // that re-adds the path lands on
+    // `/api/v1/credentials/github/v1/credentials/github`, which the assertion
+    // below catches.
+    url: `http://127.0.0.1:${port}/api/v1/credentials/github`,
     requests,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
@@ -411,7 +418,7 @@ describe("throng-creds credentials API", () => {
     expect(r.stdout).toContain("username=bot-user");
     expect(stub.requests).toHaveLength(1);
     expect(stub.requests[0].method).toBe("POST");
-    expect(stub.requests[0].path).toBe("/v1/credentials/github");
+    expect(stub.requests[0].path).toBe("/api/v1/credentials/github");
     expect(stub.requests[0].auth).toBe("Bearer task-tok");
     expect(stub.requests[0].contentType).toBe("application/json");
     expect(stub.requests[0].idempotency).toBeTruthy();

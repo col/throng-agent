@@ -308,7 +308,16 @@ iso_to_epoch() {
   return 1
 }
 
-fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
+# $5 is the complete endpoint URL and is POSTed to verbatim — the helper appends
+# no path of its own. It used to append "/v1/credentials/github", which double-
+# pathed every request: the control plane publishes the full URL (its own route
+# is `scope "/api/v1"`, so the value carries an /api prefix this script could not
+# have guessed), and the two concatenated into
+# ".../api/v1/credentials/github/v1/credentials/github" — a 404 on every mint.
+#
+# Keeping the path control-plane-side also means an API version bump needs no
+# change here, which matters because this script ships inside the sandbox image.
+fetch() { # $1=key $2=purpose $3=host $4=repo $5=endpoint_url $6=task_token
   local req resp rc rid status body msg username tok exp_iso exp_epoch serve_until scope
 
   req=$(jq -nc --arg p "$2" --arg h "$3" --arg r "$4" \
@@ -333,7 +342,7 @@ fetch() { # $1=key $2=purpose $3=host $4=repo $5=url $6=task_token
            -H "Authorization: Bearer $6" \
            -H "Content-Type: application/json" \
            -H "Idempotency-Key: $rid" \
-           -d "$req" "$5/v1/credentials/github" 2>/dev/null)
+           -d "$req" "$5" 2>/dev/null)
   rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$resp" ]; then
     die "the Throng credential service is unreachable. This is transient — retry the same command."

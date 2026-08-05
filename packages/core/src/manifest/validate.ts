@@ -175,12 +175,13 @@ function validateCredentials(value: unknown, errors: FieldError[]): void {
     // and control-plane tokens, so it is never appropriate to send in the clear.
     errors.push({ field: "credentials.url", reason: "must start with https://" });
   } else if (url.endsWith("/")) {
-    // throng-creds concatenates this raw into "$url/v1/credentials/github". A
-    // trailing slash silently produces a double slash, which most servers 404
-    // on rather than reject outright — the helper would then report a
-    // confusing runtime error at the first clone. Rejecting here, where the
-    // operator gets a precise field error, is cheaper than normalising and
-    // hoping the resulting URL still matches what the control plane expects.
+    // throng-creds POSTs to this URL verbatim, so a trailing slash is sent as
+    // given: ".../credentials/github/" is a different route from
+    // ".../credentials/github" to most routers, and they 404 it rather than
+    // reject it outright — the helper would then report a confusing runtime
+    // error at the first clone. Rejecting here, where the operator gets a
+    // precise field error, is cheaper than normalising and hoping the result
+    // still matches what the control plane serves.
     errors.push({ field: "credentials.url", reason: "must not end with a trailing slash" });
   }
   const tokenReason = nonEmptyString(value.token);
