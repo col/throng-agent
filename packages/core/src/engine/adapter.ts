@@ -23,9 +23,9 @@ export type AgentResult<TAgent> =
  */
 export interface EngineAdapter<TAgent = unknown, TConfig = unknown> {
   /** Validate + resolve the engine-specific parts of the raw manifest.
-   *  Receives the full raw input so it can read `agent` and any engine
-   *  credential fields (e.g. anthropic_api_key). Returns typed field errors
-   *  that core folds into the 400 response. */
+   *  Receives the full raw input so it can read `agent`, including its
+   *  `auth` block, which each engine resolves against its own scheme table.
+   *  Returns typed field errors that core folds into the 400 response. */
   validateAgent(input: Record<string, unknown>, env: Env): AgentResult<TAgent>;
 
   /** Inject the engine credential(s) into the process and run engine preflight. */
