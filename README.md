@@ -16,7 +16,7 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
 - Credentials: either a control-plane endpoint to fetch short-lived GitHub tokens from, or a static token
 - Agent configuration:
   - Platform type (claude, codex, etc.)
-  - Platform API Key
+  - Auth (a tagged credential — API key or, for claude, an OAuth token)
   - Model
   - Plugins
 
@@ -39,7 +39,10 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
   },
   "agent": {
     "platform": "claude",      // required — selects the engine adapter (claude | codex)
-    "api_key": "sk-…",         // generic LLM key; the adapter maps it to its SDK env var
+    "auth": {                  // the one credential; see below
+      "type": "api_key",       // claude: api_key | oauth — codex: api_key
+      "token": "sk-…"
+    },
     "model": "…",              // engine-specific
     "permission_mode": "plan", // engine-specific (claude)
     "thinking": { "type": "adaptive" }, // engine-specific (claude)
@@ -48,6 +51,64 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
   }
 }
 ```
+
+### `agent.auth`
+
+The single credential the engine runs under, tagged with its own type:
+
+```jsonc
+"auth": { "type": "oauth", "token": "sk-ant-oat01-…" }
+```
+
+| `type` | Engines | Becomes | Billing |
+| --- | --- | --- | --- |
+| `api_key` | claude, codex | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | API credits |
+| `oauth` | claude | `CLAUDE_CODE_OAUTH_TOKEN` | the token owner's Claude Code subscription |
+
+`oauth` takes the kind of token `claude setup-token` mints. An engine rejects a
+`type` it does not accept — `codex` with `oauth` is a `400` on `agent.auth.type`.
+Both fields are required and `token` must be non-blank; there is no coercion of a
+blank token to "absent", because silently switching billing mode is exactly the
+failure this shape exists to prevent. The token is trimmed before use, on both
+the manifest and the env-fallback path below, so a copy-pasted trailing newline
+never reaches the SDK's environment.
+
+`auth` may be omitted, in which case the credential falls back to the
+environment: `CLAUDE_CODE_OAUTH_TOKEN` then `ANTHROPIC_API_KEY` for claude,
+`OPENAI_API_KEY` for codex. OAuth is checked first — a sandbox carrying both is
+already an odd configuration, and exporting an OAuth token is an unambiguous
+request for subscription billing. As with the other env fallbacks, this is a
+standalone-`docker run` convenience: under E2B the runtime is resumed with a
+scrubbed environment.
+
+**Selecting a type clears the others.** The Agent SDK reads its credential off
+the process environment and the A2A wrappers hand it a copy of `process.env`, so
+an `ANTHROPIC_API_KEY` that is merely ambient in the sandbox — baked into the
+image, passed with a host `-e`, left by an earlier configuration — would reach
+Claude Code even though the manifest asked for OAuth, and the run would silently
+bill API credits. Whichever type is selected, `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN` are all removed from the
+environment before the winner is set, so the billing mode is a guarantee rather
+than a bet on the engine's internal precedence. When nothing is resolved at all
+— no `auth` block and nothing set in the environment — the scheme variables are
+left alone (there is nothing to leave alone: provably none of them was set), but
+`ANTHROPIC_AUTH_TOKEN` is still scrubbed unconditionally, since it is never a
+legitimate credential source and an ambient copy of it must not survive into the
+run regardless of what, if anything, was selected.
+
+A `~/.claude/settings.json` that *mentions* `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` in its `env` block is a hard
+boot error, checking key presence rather than truthiness — a settings `env`
+block replaces the inherited variable rather than merging with it, so even
+`{ "ANTHROPIC_API_KEY": "" }` erases the credential just set and reads to Claude
+Code as unset, letting it fall through to the next rung of its own precedence
+exactly as a deleted variable would. A top-level `apiKeyHelper` is rejected for
+the same reason: it outranks `CLAUDE_CODE_OAUTH_TOKEN` in Claude Code's own
+precedence, and it survives the environment scrub above because it isn't an
+environment variable at all.
+
+`agent.api_key` was the previous form and is **gone**, not deprecated — a
+manifest still sending it resolves no credential at all.
 
 ### `thinking` and `effort` (claude)
 
@@ -130,7 +191,7 @@ docker run -d -p 8080:8080 -p 3030:3030 --name throng-agent ghcr.io/col/throng-a
 curl -X POST localhost:8080/api/initialise -H 'content-type: application/json' -d '{
   "repos": [{"url":"https://github.com/acme/app","ref":"main","dest":"app","primary":true}],
   "github_token": "ghp_…",
-  "agent": {"platform":"claude","api_key":"sk-…"}
+  "agent": {"platform":"claude","auth":{"type":"api_key","token":"sk-…"}}
 }'
 ```
 
