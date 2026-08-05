@@ -47,7 +47,7 @@ const blankToNil = (v: unknown): string | null =>
 export function resolveAuth(
   agent: Record<string, unknown>,
   env: Env,
-  schemes: AuthScheme[],
+  schemes: readonly AuthScheme[],
 ): AuthResolution {
   const block = agent.auth;
   if (block !== undefined) {
@@ -108,8 +108,8 @@ export function resolveAuth(
  */
 export function applyAuth(
   auth: ResolvedAuth | null,
-  schemes: AuthScheme[],
-  alsoScrub: string[] = [],
+  schemes: readonly AuthScheme[],
+  alsoScrub: readonly string[] = [],
 ): void {
   let selected: AuthScheme | undefined;
   if (auth !== null) {

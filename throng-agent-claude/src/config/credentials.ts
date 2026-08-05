@@ -9,7 +9,7 @@ import type { AuthScheme } from "@throng/agent-core";
  * configuration, and going to the trouble of exporting an OAuth token is an
  * unambiguous request for subscription billing.
  */
-export const CLAUDE_AUTH_SCHEMES: AuthScheme[] = [
+export const CLAUDE_AUTH_SCHEMES: readonly AuthScheme[] = [
   { type: "oauth", env: "CLAUDE_CODE_OAUTH_TOKEN" },
   { type: "api_key", env: "ANTHROPIC_API_KEY" },
 ];
@@ -18,10 +18,16 @@ export const CLAUDE_AUTH_SCHEMES: AuthScheme[] = [
  * A credential the SDK honours but the manifest does not accept as input, so it
  * is cleared without ever becoming a fallback source.
  */
-export const CLAUDE_AUTH_ALSO_SCRUB = ["ANTHROPIC_AUTH_TOKEN"];
+export const CLAUDE_AUTH_ALSO_SCRUB: readonly string[] = ["ANTHROPIC_AUTH_TOKEN"];
 
-/** Every credential variable a settings file must not pin. */
-const PINNABLE = [...CLAUDE_AUTH_SCHEMES.map((s) => s.env), ...CLAUDE_AUTH_ALSO_SCRUB];
+/** Every env var a settings file must not mention, whatever its value. */
+const FORBIDDEN_PINS: readonly string[] = [
+  ...CLAUDE_AUTH_SCHEMES.map((s) => s.env),
+  ...CLAUDE_AUTH_ALSO_SCRUB,
+];
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Sets ANTHROPIC_API_KEY in-process (once per sandbox). No-op when key is null. */
 export function injectAnthropicKey(key: string | null): void {
@@ -29,11 +35,22 @@ export function injectAnthropicKey(key: string | null): void {
 }
 
 /**
- * Guards against ~/.claude/settings.json pinning any Anthropic credential in its
- * `env` block, which the SDK gives precedence over our per-process value. All of
- * them are rejected regardless of which mode was selected: a pinned
- * CLAUDE_CODE_OAUTH_TOKEN overrides ours exactly as readily as a pinned API key
- * does, and either way the run is billed to an account nobody chose.
+ * Guards against ~/.claude/settings.json overriding the credential we just set,
+ * by either route Claude Code's own precedence gives priority over our
+ * per-process value: an `env` block naming one of the credential variables, or
+ * a top-level `apiKeyHelper` script. The latter outranks
+ * `CLAUDE_CODE_OAUTH_TOKEN` and survives `applyAuth`'s scrub, since it isn't an
+ * environment variable at all — it never mattered while the only thing this
+ * engine injected was `ANTHROPIC_API_KEY`, which outranks it, but it matters
+ * the moment `oauth` becomes an injectable mode. Either route quietly rebills
+ * the run to an account nobody chose.
+ *
+ * Settings must not *mention* a forbidden variable at all, whatever its value:
+ * a settings `env` block replaces the inherited variable rather than merging
+ * with it, so `env: { ANTHROPIC_API_KEY: "" }` erases the credential we just
+ * set and reads to Claude Code as unset, letting it fall through to the next
+ * rung of its precedence chain exactly as a deleted variable would. So this
+ * checks key presence (`Object.hasOwn`), not truthiness.
  *
  * Absent/unreadable/unparseable settings are treated as fine — the file is
  * optional, and a missed check costs less than refusing to boot over one.
@@ -53,12 +70,19 @@ export function assertNoAnthropicCredentialInSettings(
   } catch {
     return;
   }
-  const env = (parsed as { env?: Record<string, unknown> } | null)?.env;
-  if (!env) return;
-  const pinned = PINNABLE.find((name) => env[name]);
-  if (pinned) {
+  if (!isObject(parsed)) return;
+
+  const offenders: string[] = [];
+  const env = parsed.env;
+  if (isObject(env)) {
+    offenders.push(...FORBIDDEN_PINS.filter((name) => Object.hasOwn(env, name)).map((name) => `env.${name}`));
+  }
+  if (parsed.apiKeyHelper) offenders.push("apiKeyHelper");
+
+  if (offenders.length > 0) {
     throw new Error(
-      `${settingsPath} sets env.${pinned}, which overrides the per-process credential. Remove it.`,
+      `${settingsPath} sets ${offenders.join(", ")}, which overrides the per-process credential. ` +
+        `Remove ${offenders.length > 1 ? "them" : "it"}.`,
     );
   }
 }
