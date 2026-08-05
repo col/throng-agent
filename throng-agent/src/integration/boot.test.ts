@@ -5,6 +5,19 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TaskRun, type BootDeps } from "@throng/agent-core";
 import { createRegistry } from "../registry.js";
 
+// assertNoAnthropicCredentialInSettings (run for real via the boot below)
+// resolves its default settings path through node:os's homedir(). Vitest's
+// default (worker-thread) pool gives each worker its own process.env copy
+// that native calls like os.homedir() never observe, so mutating
+// process.env.HOME below would silently fail to redirect the guard onto the
+// temp HOME this suite creates — it would keep reading the developer's real
+// ~/.claude/settings.json. Mocking homedir() to track process.env.HOME
+// directly makes the redirection real.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => process.env.HOME as string };
+});
+
 // Drive a full boot through the registry with faked bootstrap deps, asserting
 // the claude adapter is selected by agent.platform and the lifecycle reaches ready.
 function fakeDeps(): BootDeps {
