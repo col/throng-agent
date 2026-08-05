@@ -214,8 +214,21 @@ scheme's `env` were ever to collide with the selected one.
   `env.ANTHROPIC_AUTH_TOKEN` **or** `env.CLAUDE_CODE_OAUTH_TOKEN`, in either
   mode and regardless of which is selected. A pinned `CLAUDE_CODE_OAUTH_TOKEN`
   overrides the per-process one just as readily as a pinned API key does. The
-  error names the offending key. Absent/unreadable/unparseable settings stay
+  error names every offending key. Absent/unreadable/unparseable settings stay
   fine, as today.
+- Rejection is on **presence, not truthiness**. A settings `env` block *replaces*
+  the inherited variable rather than merging with it, and an empty value reads to
+  Claude Code as unset — so `env: { ANTHROPIC_API_KEY: "" }` erases the
+  credential about to be injected and falls through to the next rung of the
+  engine's precedence chain, exactly as a deletion would. The rule is that
+  settings must not *mention* these names, whatever the value.
+- A top-level **`apiKeyHelper`** is rejected too. It is a shell script named in
+  settings.json that supplies a key, and it outranks `CLAUDE_CODE_OAUTH_TOKEN` in
+  Claude Code's auth precedence. That never mattered while the only thing this
+  engine injected was `ANTHROPIC_API_KEY`, which outranks it — it matters the
+  moment `oauth` becomes an injectable mode, and it survives `applyAuth`'s scrub
+  because it is not an environment variable at all. Checked by truthiness rather
+  than presence, deliberately: an empty helper names no script.
 
 **`src/adapter.ts`** — `injectCredentials` becomes:
 
