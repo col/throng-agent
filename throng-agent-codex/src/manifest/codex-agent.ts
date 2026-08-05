@@ -1,4 +1,5 @@
-import { resolveApiKey, type AgentResult, type Env, type FieldError } from "@throng/agent-core";
+import { resolveAuth, type AgentResult, type Env, type FieldError, type ResolvedAuth } from "@throng/agent-core";
+import { CODEX_AUTH_SCHEMES } from "../config/credentials.js";
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
 const APPROVAL_POLICIES = new Set(["never", "on-request", "on-failure", "untrusted"]);
@@ -8,8 +9,14 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 
 /** The resolved, Codex-shaped agent payload stored on `manifest.agent`. */
 export interface ResolvedCodexAgent {
+  /**
+   * Raw agent keys (model, sandbox_mode, approval_policy, ...), minus `auth`
+   * — the plaintext credential already lives resolved on `auth` below, so
+   * leaving a second, raw copy here would just be a long-lived plaintext
+   * secret sitting in a bag nothing needs it to be in.
+   */
   keys: Record<string, unknown>;
-  api_key: string | null;
+  auth: ResolvedAuth | null;
 }
 
 export function validateCodexAgent(
@@ -17,6 +24,7 @@ export function validateCodexAgent(
   env: Env,
 ): AgentResult<ResolvedCodexAgent> {
   const errors: FieldError[] = [];
+  let auth: ResolvedAuth | null = null;
 
   if (!("agent" in input)) {
     errors.push({ field: "agent", reason: "is required" });
@@ -39,16 +47,15 @@ export function validateCodexAgent(
         reason: "must be one of never/on-request/on-failure/untrusted",
       });
     }
-    if ("api_key" in a && typeof a.api_key !== "string") {
-      errors.push({ field: "agent.api_key", reason: "must be a string" });
-    }
+    const authResult = resolveAuth(a, env, CODEX_AUTH_SCHEMES);
+    if (authResult.ok) auth = authResult.auth;
+    else errors.push(...authResult.errors);
   }
 
   if (errors.length > 0) return { ok: false, errors };
 
   const a = (input.agent as Record<string, unknown>) ?? {};
-  return {
-    ok: true,
-    agent: { keys: a, api_key: resolveApiKey(a, env, ["OPENAI_API_KEY"]) },
-  };
+  // Non-mutating: `a` is `input.agent`, which belongs to the caller.
+  const { auth: _auth, ...keys } = a;
+  return { ok: true, agent: { keys, auth } };
 }

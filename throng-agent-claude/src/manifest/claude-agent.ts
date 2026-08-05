@@ -1,4 +1,5 @@
-import { resolveApiKey, type AgentResult, type Env, type FieldError } from "@throng/agent-core";
+import { resolveAuth, type AgentResult, type Env, type FieldError, type ResolvedAuth } from "@throng/agent-core";
+import { CLAUDE_AUTH_SCHEMES } from "../config/credentials.js";
 import { EMPTY_PLUGINS, resolvePlugins, type ResolvedPlugins } from "../config/plugins.js";
 
 const PERMISSION_MODES = new Set(["acceptEdits", "dontAsk", "plan", "bypassPermissions"]);
@@ -10,10 +11,15 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 
 /** The resolved, Claude-shaped agent payload stored on `manifest.agent`. */
 export interface ResolvedClaudeAgent {
-  /** Raw agent keys (model, tools, system prompts, max_turns, permission_mode). */
+  /**
+   * Raw agent keys (model, tools, system prompts, max_turns, permission_mode),
+   * minus `auth` — the plaintext credential already lives resolved on `auth`
+   * below, so leaving a second, raw copy here would just be a long-lived
+   * plaintext secret sitting in a bag nothing needs it to be in.
+   */
   keys: Record<string, unknown>;
   plugins: ResolvedPlugins;
-  api_key: string | null;
+  auth: ResolvedAuth | null;
 }
 
 export function validateClaudeAgent(
@@ -22,6 +28,7 @@ export function validateClaudeAgent(
 ): AgentResult<ResolvedClaudeAgent> {
   const errors: FieldError[] = [];
   let plugins: ResolvedPlugins = EMPTY_PLUGINS;
+  let auth: ResolvedAuth | null = null;
 
   if (!("agent" in input)) {
     errors.push({ field: "agent", reason: "is required" });
@@ -37,9 +44,6 @@ export function validateClaudeAgent(
     }
     if ("model" in a && typeof a.model !== "string") {
       errors.push({ field: "agent.model", reason: "must be a string" });
-    }
-    if ("api_key" in a && typeof a.api_key !== "string") {
-      errors.push({ field: "agent.api_key", reason: "must be a string" });
     }
     if ("effort" in a && !EFFORT_LEVELS.has(a.effort as string)) {
       errors.push({ field: "agent.effort", reason: "must be one of low/medium/high/xhigh/max" });
@@ -64,13 +68,16 @@ export function validateClaudeAgent(
     const resolution = resolvePlugins(a.plugins);
     if (resolution.ok) plugins = resolution.resolved;
     else errors.push(...resolution.errors);
+
+    const authResult = resolveAuth(a, env, CLAUDE_AUTH_SCHEMES);
+    if (authResult.ok) auth = authResult.auth;
+    else errors.push(...authResult.errors);
   }
 
   if (errors.length > 0) return { ok: false, errors };
 
   const a = (input.agent as Record<string, unknown>) ?? {};
-  return {
-    ok: true,
-    agent: { keys: a, plugins, api_key: resolveApiKey(a, env, ["ANTHROPIC_API_KEY"]) },
-  };
+  // Non-mutating: `a` is `input.agent`, which belongs to the caller.
+  const { auth: _auth, ...keys } = a;
+  return { ok: true, agent: { keys, plugins, auth } };
 }
