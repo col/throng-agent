@@ -13,7 +13,7 @@ export interface AuthScheme {
   env: string;
 }
 
-/** A resolved credential. `token` is guaranteed non-blank. */
+/** A resolved credential. `token` is guaranteed trimmed and non-blank. */
 export interface ResolvedAuth {
   type: string;
   token: string;
@@ -26,8 +26,8 @@ export type AuthResolution =
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-const nonBlank = (v: unknown): string | null =>
-  typeof v === "string" && v.trim() !== "" ? v : null;
+const blankToNil = (v: unknown): string | null =>
+  typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 
 /**
  * Resolves the one credential an engine will use: the manifest's `agent.auth`
@@ -62,7 +62,7 @@ export function resolveAuth(
         reason: `must be one of ${schemes.map((s) => s.type).join("/")}`,
       });
     }
-    const token = nonBlank(block.token);
+    const token = blankToNil(block.token);
     if (token === null) {
       errors.push({ field: "agent.auth.token", reason: "must be a non-empty string" });
     }
@@ -73,7 +73,7 @@ export function resolveAuth(
   }
 
   for (const scheme of schemes) {
-    const token = nonBlank(env[scheme.env]);
+    const token = blankToNil(env[scheme.env]);
     if (token !== null) return { ok: true, auth: { type: scheme.type, token } };
   }
   return { ok: true, auth: null };

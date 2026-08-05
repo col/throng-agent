@@ -5,7 +5,6 @@ const SCHEMES: AuthScheme[] = [
   { type: "oauth", env: "CLAUDE_CODE_OAUTH_TOKEN" },
   { type: "api_key", env: "ANTHROPIC_API_KEY" },
 ];
-const API_KEY_ONLY: AuthScheme[] = [{ type: "api_key", env: "OPENAI_API_KEY" }];
 
 /** Unwraps a successful resolution, failing the test with the errors if not. */
 const auth = (r: AuthResolution) => {
@@ -26,8 +25,11 @@ describe("resolveAuth", () => {
   });
 
   it("accepts each type the table lists", () => {
-    expect(auth(resolveAuth({ auth: { type: "api_key", token: "sk-1" } }, {}, SCHEMES)))
-      .toEqual({ type: "api_key", token: "sk-1" });
+    for (const scheme of SCHEMES) {
+      const token = `tok-${scheme.type}`;
+      expect(auth(resolveAuth({ auth: { type: scheme.type, token } }, {}, SCHEMES)))
+        .toEqual({ type: scheme.type, token });
+    }
   });
 
   it("falls back through the env vars in table order", () => {
@@ -54,15 +56,17 @@ describe("resolveAuth", () => {
   });
 
   it("rejects an auth block that is not an object", () => {
-    expect(fields(resolveAuth({ auth: "sk-1" }, {}, SCHEMES))).toEqual(["agent.auth"]);
+    const r = resolveAuth({ auth: "sk-1" }, {}, SCHEMES);
+    expect(fields(r)).toEqual(["agent.auth"]);
+    if (!r.ok) expect(r.errors[0].reason).toBe("must be an object");
     expect(fields(resolveAuth({ auth: null }, {}, SCHEMES))).toEqual(["agent.auth"]);
     expect(fields(resolveAuth({ auth: [] }, {}, SCHEMES))).toEqual(["agent.auth"]);
   });
 
   it("rejects a type the table does not list, naming the accepted ones", () => {
-    const r = resolveAuth({ auth: { type: "oauth", token: "x" } }, {}, API_KEY_ONLY);
+    const r = resolveAuth({ auth: { type: "nope", token: "x" } }, {}, SCHEMES);
     expect(fields(r)).toEqual(["agent.auth.type"]);
-    if (!r.ok) expect(r.errors[0].reason).toBe("must be one of api_key");
+    if (!r.ok) expect(r.errors[0].reason).toBe("must be one of oauth/api_key");
   });
 
   it("rejects a missing type", () => {
@@ -70,9 +74,18 @@ describe("resolveAuth", () => {
   });
 
   it("rejects a missing, non-string or blank token", () => {
-    expect(fields(resolveAuth({ auth: { type: "oauth" } }, {}, SCHEMES))).toEqual(["agent.auth.token"]);
+    const r = resolveAuth({ auth: { type: "oauth" } }, {}, SCHEMES);
+    expect(fields(r)).toEqual(["agent.auth.token"]);
+    if (!r.ok) expect(r.errors[0].reason).toBe("must be a non-empty string");
     expect(fields(resolveAuth({ auth: { type: "oauth", token: 5 } }, {}, SCHEMES))).toEqual(["agent.auth.token"]);
     expect(fields(resolveAuth({ auth: { type: "oauth", token: "  " } }, {}, SCHEMES))).toEqual(["agent.auth.token"]);
+  });
+
+  it("trims surrounding whitespace from a resolved token", () => {
+    expect(auth(resolveAuth({ auth: { type: "oauth", token: "  oat-1  \n" } }, {}, SCHEMES)))
+      .toEqual({ type: "oauth", token: "oat-1" });
+    expect(auth(resolveAuth({}, { ANTHROPIC_API_KEY: "\tsk-env\n" }, SCHEMES)))
+      .toEqual({ type: "api_key", token: "sk-env" });
   });
 
   it("reports a bad type and a bad token together", () => {
