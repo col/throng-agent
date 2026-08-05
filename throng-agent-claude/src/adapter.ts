@@ -2,7 +2,7 @@ import { createA2AServer, type AgentConfig, type ServerHandle as ClaudeServerHan
 import type { AgentResult, EngineAdapter, Env, Manifest, ServerHandle } from "@throng/agent-core";
 import { log } from "@throng/agent-core";
 import { buildAgentConfig } from "./config/build.js";
-import { assertNoAnthropicKeyInSettings, injectAnthropicKey } from "./config/credentials.js";
+import { assertNoAnthropicCredentialInSettings, injectAnthropicKey } from "./config/credentials.js";
 import { validateClaudeAgent, type ResolvedClaudeAgent } from "./manifest/claude-agent.js";
 
 // Message shapes owned by a2a-claude's plugin preflight; a miss only coarsens
@@ -17,7 +17,7 @@ export class ClaudeEngineAdapter
   }
 
   injectCredentials(manifest: Manifest<ResolvedClaudeAgent>): void {
-    assertNoAnthropicKeyInSettings();
+    assertNoAnthropicCredentialInSettings();
     injectAnthropicKey(manifest.agent.api_key);
     if (manifest.agent.api_key === null) {
       log.warn("no api_key in manifest; agent requests will fail unless another auth path is configured");
