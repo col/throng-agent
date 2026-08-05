@@ -81,4 +81,19 @@ describe("validateCodexAgent", () => {
       expect(r.agent.keys.model).toBe("o4-mini");
     }
   });
+
+  it("excludes auth from the raw keys passthrough, though agent.auth still carries it", () => {
+    // keys is a raw-keys bag; auth carries a plaintext token, so a future
+    // refactor back to `keys: a` would silently re-duplicate the credential.
+    const r = validateCodexAgent(
+      { agent: { model: "o4-mini", auth: { type: "api_key", token: "sk-1" } } },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.agent.keys).not.toHaveProperty("auth");
+      expect(r.agent.keys.model).toBe("o4-mini");
+      expect(r.agent.auth).toEqual({ type: "api_key", token: "sk-1" });
+    }
+  });
 });

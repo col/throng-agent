@@ -11,7 +11,12 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 
 /** The resolved, Claude-shaped agent payload stored on `manifest.agent`. */
 export interface ResolvedClaudeAgent {
-  /** Raw agent keys (model, tools, system prompts, max_turns, permission_mode). */
+  /**
+   * Raw agent keys (model, tools, system prompts, max_turns, permission_mode),
+   * minus `auth` — the plaintext credential already lives resolved on `auth`
+   * below, so leaving a second, raw copy here would just be a long-lived
+   * plaintext secret sitting in a bag nothing needs it to be in.
+   */
   keys: Record<string, unknown>;
   plugins: ResolvedPlugins;
   auth: ResolvedAuth | null;
@@ -72,5 +77,7 @@ export function validateClaudeAgent(
   if (errors.length > 0) return { ok: false, errors };
 
   const a = (input.agent as Record<string, unknown>) ?? {};
-  return { ok: true, agent: { keys: a, plugins, auth } };
+  // Non-mutating: `a` is `input.agent`, which belongs to the caller.
+  const { auth: _auth, ...keys } = a;
+  return { ok: true, agent: { keys, plugins, auth } };
 }

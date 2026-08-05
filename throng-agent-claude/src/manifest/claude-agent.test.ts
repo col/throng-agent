@@ -133,4 +133,19 @@ describe("validateClaudeAgent", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.thinking.budget_tokens")).toBe(true);
   });
+
+  it("excludes auth from the raw keys passthrough, though agent.auth still carries it", () => {
+    // keys is a raw-keys bag; auth carries a plaintext token, so a future
+    // refactor back to `keys: a` would silently re-duplicate the credential.
+    const r = validateClaudeAgent(
+      { agent: { model: "claude-opus-5", auth: { type: "api_key", token: "sk-1" } } },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.agent.keys).not.toHaveProperty("auth");
+      expect(r.agent.keys.model).toBe("claude-opus-5");
+      expect(r.agent.auth).toEqual({ type: "api_key", token: "sk-1" });
+    }
+  });
 });
