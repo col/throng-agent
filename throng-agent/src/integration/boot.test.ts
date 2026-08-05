@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TaskRun, type BootDeps } from "@throng/agent-core";
 import { createRegistry } from "../registry.js";
 
@@ -18,6 +21,30 @@ function fakeDeps(): BootDeps {
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe("throng-agent boot routing", () => {
+  // The real ClaudeEngineAdapter.injectCredentials runs during this boot, so it
+  // both mutates the credential env vars and reads the real
+  // ~/.claude/settings.json. Names are hand-listed rather than imported from
+  // throng-agent-claude's credentials module, which isn't part of that
+  // package's public export surface — keep this list in sync with
+  // CLAUDE_AUTH_SCHEMES/CLAUDE_AUTH_ALSO_SCRUB there.
+  const CREDENTIAL_VARS = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"];
+  let savedEnv: Record<string, string | undefined>;
+  let savedHome: string | undefined;
+  beforeAll(() => {
+    savedEnv = Object.fromEntries(CREDENTIAL_VARS.map((n) => [n, process.env[n]]));
+    savedHome = process.env.HOME;
+    process.env.HOME = mkdtempSync(join(tmpdir(), "throng-agent-boot-"));
+  });
+  afterAll(() => {
+    for (const n of CREDENTIAL_VARS) {
+      const v = savedEnv[n];
+      if (v === undefined) delete process.env[n];
+      else process.env[n] = v;
+    }
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  });
+
   it("routes agent.platform=claude through the claude adapter to ready", async () => {
     const tr = new TaskRun(fakeDeps(), createRegistry());
     const res = await tr.initialise({
