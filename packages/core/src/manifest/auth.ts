@@ -78,3 +78,40 @@ export function resolveAuth(
   }
   return { ok: true, auth: null };
 }
+
+/**
+ * Puts the resolved credential into the process environment and removes every
+ * competing one.
+ *
+ * The scrub is the point of this function. The Agent SDK reads its credential
+ * off the process environment, and the A2A wrappers hand it a copy of
+ * `process.env` — so a key that is merely ambient in the sandbox (baked into the
+ * image, passed with a host `-e`, left by an earlier configuration) reaches the
+ * engine even when the manifest never mentioned it, and the run silently bills
+ * the wrong account. Precedence between the competing variables is internal to
+ * the engine and not a documented contract, so it is not relied on: the losing
+ * variables are removed outright.
+ *
+ * Safe to call during initialise because the wrappers snapshot `process.env`
+ * per query, long after this has run.
+ *
+ * A null `auth` scrubs nothing: nothing was selected, so nothing is claimed and
+ * whatever the operator put in the environment is left as they left it.
+ */
+export function applyAuth(
+  auth: ResolvedAuth | null,
+  schemes: AuthScheme[],
+  alsoScrub: string[] = [],
+): void {
+  if (auth === null) return;
+  const selected = schemes.find((s) => s.type === auth.type);
+  if (!selected) {
+    throw new Error(`no auth scheme is registered for type '${auth.type}'`);
+  }
+  // Scrub every candidate including the selected one, then set — so the result
+  // is correct even if a scrub name ever collided with the injection target.
+  for (const name of [...schemes.map((s) => s.env), ...alsoScrub]) {
+    delete process.env[name];
+  }
+  process.env[selected.env] = auth.token;
+}

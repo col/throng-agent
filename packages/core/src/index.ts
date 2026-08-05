@@ -3,6 +3,13 @@ export { TaskRun, type BootDeps, type InitialiseResult } from "./task-run.js";
 export { Lifecycle, type LifecycleState, type StatusView, type FailureDetail } from "./lifecycle.js";
 export { validate } from "./manifest/validate.js";
 export { resolveApiKey } from "./manifest/api-key.js";
+export {
+  resolveAuth,
+  applyAuth,
+  type AuthScheme,
+  type ResolvedAuth,
+  type AuthResolution,
+} from "./manifest/auth.js";
 export type {
   RepoSpec,
   FieldError,
