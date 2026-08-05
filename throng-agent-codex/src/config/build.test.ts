@@ -9,7 +9,7 @@ const manifest = (keys: Record<string, unknown>): Manifest<ResolvedCodexAgent> =
   user_identity: { name: null, email: null },
   setup_commands: [],
   platform: "codex",
-  agent: { keys, api_key: null },
+  agent: { keys, auth: null },
 });
 
 describe("buildAgentConfig", () => {

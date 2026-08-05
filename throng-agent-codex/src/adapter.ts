@@ -1,8 +1,8 @@
 import { createA2AServer, type AgentConfig, type ServerHandle as CodexServerHandle } from "a2a-codex";
 import type { AgentResult, EngineAdapter, Env, Manifest, ServerHandle } from "@throng/agent-core";
-import { log } from "@throng/agent-core";
+import { applyAuth, log } from "@throng/agent-core";
 import { buildAgentConfig } from "./config/build.js";
-import { injectOpenAIKey } from "./config/credentials.js";
+import { CODEX_AUTH_SCHEMES } from "./config/credentials.js";
 import { validateCodexAgent, type ResolvedCodexAgent } from "./manifest/codex-agent.js";
 
 export class CodexEngineAdapter
@@ -13,9 +13,9 @@ export class CodexEngineAdapter
   }
 
   injectCredentials(manifest: Manifest<ResolvedCodexAgent>): void {
-    injectOpenAIKey(manifest.agent.api_key);
-    if (manifest.agent.api_key === null) {
-      log.warn("no api_key in manifest; agent requests will fail unless another auth path is configured");
+    applyAuth(manifest.agent.auth, CODEX_AUTH_SCHEMES);
+    if (manifest.agent.auth === null) {
+      log.warn("no agent.auth in manifest; agent requests will fail unless another auth path is configured");
     }
   }
 
