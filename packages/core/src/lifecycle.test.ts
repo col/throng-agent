@@ -21,4 +21,14 @@ describe("Lifecycle", () => {
     expect(l.state).toBe("failed");
     expect(l.status()).toEqual({ state: "failed", error: { step: "cloning", message: "repo unreachable" } });
   });
+
+  // `prepared` is a terminal REST state, not a failure state: a snapshot is taken
+  // here, and the sandbox restored from it still accepts one /api/initialise.
+  // GET /api/status has to report it, because the control plane's poller is what
+  // decides the snapshot is ready to capture.
+  it("reports prepared as a plain state, with no error", () => {
+    const l = new Lifecycle();
+    l.set("prepared");
+    expect(l.status()).toEqual({ state: "prepared" });
+  });
 });

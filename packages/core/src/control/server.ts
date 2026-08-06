@@ -1,10 +1,10 @@
 import type { Server } from "node:http";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { clone, checkout } from "../bootstrap/git.js";
+import { syncOrClone } from "../bootstrap/git.js";
 import { runSetupCommands } from "../bootstrap/setup.js";
 import { injectGitIdentity } from "../bootstrap/git-identity.js";
-import { writeCredentialConfig } from "../creds/config.js";
+import { deleteCredentialConfig, writeCredentialConfig } from "../creds/config.js";
 import { homeDir } from "../env.js";
 import type { AdapterRegistry } from "../engine/adapter.js";
 import { log } from "../log.js";
@@ -45,6 +45,26 @@ export function createControlApp(opts: ControlAppOptions): Express {
     }
   });
 
+  // Warms the workspace for a project snapshot: no agent, no engine credential,
+  // no A2A server. The control plane maps both 202 and 409 to :ok, because the
+  // Oban job that drives this has to be safe to retry.
+  app.post("/api/prepare", async (req, res) => {
+    log.info("POST /api/prepare received");
+    if (!checkInitToken(process.env.THRONG_INIT_TOKEN, req.headers.authorization)) {
+      log.warn("POST /api/prepare rejected: unauthorized (bad or missing THRONG_INIT_TOKEN)");
+      res.status(401).json({ error: "unauthorized" });
+      return;
+    }
+    const result = await taskRun.prepare(req.body);
+    if (result.ok) {
+      res.status(202).json({ status: result.status });
+    } else if ("already" in result) {
+      res.status(409).json({ error: "already_prepared" });
+    } else {
+      res.status(400).json(result.errors);
+    }
+  });
+
   app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
     if (err instanceof SyntaxError && "body" in (err as object)) {
       res.status(400).json([{ field: "manifest", reason: "invalid JSON body" }]);
@@ -74,10 +94,10 @@ export function createControlApp(opts: ControlAppOptions): Express {
  */
 export function defaultBootDeps(): BootDeps {
   return {
-    clone,
-    checkout,
+    syncOrClone,
     runSetupCommands,
     writeCredentialConfig: (manifest) => writeCredentialConfig(manifest),
+    deleteCredentialConfig: () => deleteCredentialConfig(),
     injectGitIdentity,
     // `||` rather than `??` so a blank WORKSPACE_DIR falls back instead of
     // resolving every clone destination against "".

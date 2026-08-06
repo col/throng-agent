@@ -40,15 +40,27 @@ export interface UserIdentity {
   email: string | null;
 }
 
-/** Engine-agnostic manifest skeleton owned by core. */
-export interface BaseManifest {
+/**
+ * The workspace half of a manifest: everything needed to put repositories and
+ * their dependencies on disk, and nothing about the agent that will use them.
+ *
+ * `/api/prepare` sends exactly this, and a snapshot built from it is shared by
+ * every task in the project — so the absence of `agent` and `user_identity` is
+ * a property of the type, not a convention the two routes have to remember.
+ */
+export interface WorkspaceManifest {
   repos: RepoSpec[];
   /** Pull mode. Null in standalone mode, where `github_token` is used instead. */
   credentials: CredentialsConfig | null;
   /** A literal token. Takes precedence over `credentials` when both are set. */
   github_token: string | null;
-  user_identity: UserIdentity;
   setup_commands: string[];
+}
+
+/** Engine-agnostic manifest skeleton owned by core: a workspace plus the commit
+ *  identity the task's work is attributed to. */
+export interface BaseManifest extends WorkspaceManifest {
+  user_identity: UserIdentity;
 }
 
 /**
@@ -62,4 +74,8 @@ export interface Manifest<TAgent = unknown> extends BaseManifest {
 
 export type ValidateResult<TAgent = unknown> =
   | { ok: true; manifest: Manifest<TAgent>; adapter: EngineAdapter<TAgent> }
+  | { ok: false; errors: FieldError[] };
+
+export type PrepareValidateResult =
+  | { ok: true; manifest: WorkspaceManifest }
   | { ok: false; errors: FieldError[] };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validate } from "./validate.js";
+import { validate, validatePrepare } from "./validate.js";
 import type { AgentResult, EngineAdapter } from "../engine/adapter.js";
 
 // Echo adapter: assumes core already checked agent-is-object + platform;
@@ -224,5 +224,213 @@ describe("credentials block", () => {
     const fallback = validate(base, registry, { GITHUB_TOKEN: "ghp_b" });
     expect(fallback.ok).toBe(true);
     if (fallback.ok) expect(fallback.manifest.github_token).toBe("ghp_b");
+  });
+});
+
+// The exact body Throng.Agents.Manifest.Resolve.prepare_payload/2 produces.
+// Keys whose value is nil are dropped by the control plane, so github_token is
+// absent here rather than null.
+const preparePayload = {
+  repos: [{ url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true }],
+  setup_commands: ["mise install", "mix deps.get"],
+  credentials: { url: "https://cp.example/api/credentials", token: "identity-token" },
+};
+
+describe("validatePrepare", () => {
+  const errorsOf = (input: unknown) => {
+    const r = validatePrepare(input);
+    if (r.ok) throw new Error("expected validation to fail");
+    return r.errors;
+  };
+
+  // An explicit empty env, like the initialise token cases: github_token falls
+  // back to GITHUB_TOKEN, so a developer with one set would otherwise fail this.
+  it("accepts the control plane's prepare payload", () => {
+    const r = validatePrepare(preparePayload, {});
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.manifest.repos).toEqual([
+        { url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true },
+      ]);
+      expect(r.manifest.setup_commands).toEqual(["mise install", "mix deps.get"]);
+      expect(r.manifest.credentials).toEqual({
+        url: "https://cp.example/api/credentials",
+        token: "identity-token",
+      });
+      expect(r.manifest.github_token).toBeNull();
+      // The type has no user_identity, and the built manifest must not grow one:
+      // git identity is a per-task /api/initialise concern and a `git config
+      // --global` write does not belong in an image shared by every task.
+      expect("user_identity" in r.manifest).toBe(false);
+    }
+  });
+
+  it("accepts the standalone form with a static github_token", () => {
+    const { credentials, ...rest } = preparePayload;
+    const r = validatePrepare({ ...rest, github_token: "ghp_static" }, {});
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.manifest.github_token).toBe("ghp_static");
+      expect(r.manifest.credentials).toBeNull();
+    }
+  });
+
+  // Rejected rather than ignored. A snapshot is shared by every task in the
+  // project and is stored by E2B, so no agent configuration and no LLM credential
+  // may be baked into one. The control plane guarantees that by construction —
+  // prepare_payload/2 never references these fields — so a manifest carrying one
+  // is an initialise manifest sent to the wrong route, and saying so is more
+  // useful than silently building a snapshot the caller misunderstands.
+  it("rejects an agent block", () => {
+    const fields = errorsOf({ ...preparePayload, agent: { platform: "claude" } }).map((e) => e.field);
+    expect(fields).toContain("agent");
+  });
+
+  // Presence, not truthiness: an explicit null is still a caller that thinks this
+  // route takes an agent.
+  it("rejects an explicitly null agent block", () => {
+    expect(errorsOf({ ...preparePayload, agent: null }).map((e) => e.field)).toContain("agent");
+  });
+
+  it("rejects a user_identity block", () => {
+    const fields = errorsOf({ ...preparePayload, user_identity: { name: "A", email: "a@b.c" } }).map(
+      (e) => e.field,
+    );
+    expect(fields).toContain("user_identity");
+  });
+
+  // Both, not just the first. These are two independent pushes onto one error
+  // list, and the validators in this file report every bad field at once so a
+  // caller with two mistakes gets one complete 400 rather than a second round
+  // trip — an early return between them would still pass the two cases above.
+  it("reports both agent and user_identity when a manifest carries both", () => {
+    const fields = errorsOf({
+      ...preparePayload,
+      agent: { platform: "claude" },
+      user_identity: { name: "A", email: "a@b.c" },
+    }).map((e) => e.field);
+
+    expect(fields).toContain("agent");
+    expect(fields).toContain("user_identity");
+  });
+
+  it("applies the same repo rules as initialise", () => {
+    expect(errorsOf({ ...preparePayload, repos: [] }).map((e) => e.field)).toContain("repos");
+    expect(errorsOf({ repos: preparePayload.repos.map((r) => ({ ...r, primary: false })) }).map((e) => e.field))
+      .toContain("repos[].primary");
+    expect(errorsOf({ ...preparePayload, repos: [{ ...preparePayload.repos[0], url: "http://x/y" }] })
+      .map((e) => e.field)).toContain("repos[0].url");
+  });
+
+  it("applies the same credentials and setup_commands rules as initialise", () => {
+    expect(errorsOf({ ...preparePayload, credentials: { url: "https://cp/", token: "t" } })
+      .map((e) => e.field)).toContain("credentials.url");
+    expect(errorsOf({ ...preparePayload, setup_commands: [""] }).map((e) => e.field))
+      .toContain("setup_commands");
+  });
+
+  // The two rules the suite above reaches only through `validate`: one cross-field
+  // and one per-field. Both routes call the same helpers, so what this catches is
+  // a wiring regression specific to validatePrepare — the cross-field pass
+  // dropped, or `repos` handed to it where the whole input belongs.
+  //
+  // Separate calls, deliberately: crossFieldRepoErrors runs only once every
+  // per-field check has passed, so a manifest carrying both mistakes would report
+  // github_token alone and the dest rule would never be exercised.
+  it("applies the shared dest-uniqueness and github_token rules", () => {
+    const duplicated = {
+      ...preparePayload,
+      repos: [
+        { url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true },
+        { url: "https://github.com/acme/api.git", ref: "main", dest: "web", primary: false },
+      ],
+    };
+    expect(errorsOf(duplicated).map((e) => e.field)).toContain("repos[].dest");
+
+    expect(errorsOf({ ...preparePayload, github_token: 1 }).map((e) => e.field)).toContain(
+      "github_token",
+    );
+  });
+
+  // Prepare-only, and the asymmetry with initialise is the point. git writes the
+  // clone URL verbatim into <dest>/.git/config, that file is inside the workspace
+  // the snapshot captures, and the credential wipe only reaches $HOME/.throng —
+  // so on this route a token in the URL is a credential baked into an image every
+  // task in the project boots from. On a task sandbox the same URL is a logging
+  // concern that redactTokens already handles, and rejecting it there would send
+  // new 400s to an unchanged control plane.
+  it("rejects a repo url with credentials embedded in it", () => {
+    const withCreds = (url: string) =>
+      errorsOf({ ...preparePayload, repos: [{ ...preparePayload.repos[0], url }] }).map((e) => e.field);
+
+    expect(withCreds("https://x-access-token:ghs_live@github.com/acme/web.git")).toContain("repos[0].url");
+    expect(withCreds("https://ghp_live@github.com/acme/web.git")).toContain("repos[0].url");
+  });
+
+  it("accepts an @ that is not userinfo", () => {
+    // A path segment, not an authority: git stores nothing sensitive here.
+    const r = validatePrepare(
+      { ...preparePayload, repos: [{ ...preparePayload.repos[0], url: "https://git.example/~@acme/web.git" }] },
+      {},
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects a non-object body", () => {
+    expect(errorsOf(42).map((e) => e.field)).toEqual(["manifest"]);
+  });
+});
+
+// A shared rule, so it is pinned on both routes at once. `join(workspaceRoot, ".")`
+// is the workspace root itself, and syncOrClone removes a destination that is not
+// already a work tree for the same remote — so accepting this would turn one
+// manifest field into `rm -rf` of the whole workspace, including repos synced
+// earlier in the same loop. Before syncOrClone it was a plain clone failure.
+describe("repos[].dest may not resolve to the workspace root", () => {
+  const initialise = (dest: string) =>
+    validate({ repos: [{ url: "https://x/y", ref: "main", dest, primary: true }], agent: { platform: "test" } }, registry, {});
+  const prepare = (dest: string) =>
+    validatePrepare({ ...preparePayload, repos: [{ ...preparePayload.repos[0], dest }] }, {});
+
+  it.each([".", "./"])("is rejected by both routes for %j", (dest) => {
+    for (const r of [initialise(dest), prepare(dest)]) {
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.errors.map((e) => e.field)).toContain("repos[0].dest");
+    }
+  });
+
+  // The guard must not catch an ordinary nested destination, which is the shape
+  // a multi-repo project actually sends.
+  it("still accepts a nested dest on both routes", () => {
+    expect(initialise("services/api").ok).toBe(true);
+    expect(prepare("services/api").ok).toBe(true);
+  });
+});
+
+describe("validate (credential-bearing repo urls stay legal on initialise)", () => {
+  // The counterpart to the prepare rejection above. This form is deliberate
+  // input on /api/initialise — the fixtures in this repo use it and redactTokens
+  // exists for it — so a regression that moved the check into the shared repo
+  // rules would start 400ing an unchanged control plane. Pinned from both sides.
+  it("accepts a repo url with credentials embedded in it", () => {
+    const r = validate(
+      {
+        repos: [
+          {
+            url: "https://x-access-token:ghs_live@github.com/acme/web.git",
+            ref: "main",
+            dest: "web",
+            primary: true,
+          },
+        ],
+        agent: { platform: "test" },
+      },
+      registry,
+      {},
+    );
+
+    expect(r.ok).toBe(true);
   });
 });

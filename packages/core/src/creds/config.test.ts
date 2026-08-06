@@ -1,9 +1,28 @@
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { writeCredentialConfig } from "./config.js";
+import { credsCachePath, deleteCredentialConfig, writeCredentialConfig } from "./config.js";
 import type { BaseManifest } from "../manifest/types.js";
+
+// The wipe's post-condition guards the case where rmSync returns without having
+// removed anything — an immutable file, a busy mount point, a directory
+// repopulated by a throng-creds invocation still in flight. None of those can be
+// produced portably from a test, so rmSync is neutered for the one case that
+// asserts the post-condition and runs for real everywhere else. Same technique
+// the boot integration suite uses on node:os, and for the same reason: the thing
+// under test is a native call's effect, not a value this code computes.
+let swallowRmSync = false;
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (swallowRmSync) return;
+      actual.rmSync(...args);
+    },
+  };
+});
 
 function manifest(over: Partial<BaseManifest> = {}): BaseManifest {
   return {
@@ -193,5 +212,155 @@ describe("CONFIG_PATH", () => {
     process.env.HOME = "/home/user";
 
     expect(await reimport()).toBe("/home/user/.throng/config.json");
+  });
+});
+
+describe("credsCachePath", () => {
+  const originalCache = process.env.THRONG_CREDS_CACHE;
+  const originalHome = process.env.HOME;
+  afterEach(() => {
+    if (originalCache === undefined) delete process.env.THRONG_CREDS_CACHE;
+    else process.env.THRONG_CREDS_CACHE = originalCache;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  });
+
+  // Must agree with throng-creds.sh's ${THRONG_CREDS_CACHE:-$HOME/.throng/cache}:
+  // the runtime deletes what the helper writes, and a disagreement would leave
+  // live tokens in the snapshot while every test still passed.
+  it("defaults to $HOME/.throng/cache", () => {
+    delete process.env.THRONG_CREDS_CACHE;
+    process.env.HOME = "/home/user";
+
+    expect(credsCachePath()).toBe("/home/user/.throng/cache");
+  });
+
+  it("honours THRONG_CREDS_CACHE, and treats a blank value as unset", () => {
+    process.env.HOME = "/home/user";
+    process.env.THRONG_CREDS_CACHE = "/mnt/cache";
+    expect(credsCachePath()).toBe("/mnt/cache");
+    process.env.THRONG_CREDS_CACHE = "";
+    expect(credsCachePath()).toBe("/home/user/.throng/cache");
+  });
+});
+
+describe("deleteCredentialConfig", () => {
+  function populated(): { config: string; cache: string } {
+    const dir = mkdtempSync(join(tmpdir(), "throng-wipe-"));
+    const config = join(dir, ".throng", "config.json");
+    const cache = join(dir, ".throng", "cache");
+    writeCredentialConfig(manifest({ credentials: { url: "https://cp", token: "tok" } }), config);
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, "git_github.com_acme_app"), "9999999999\nkey\nusername=x\npassword=ghs_live\n");
+    return { config, cache };
+  }
+
+  it("removes the config file and the whole cache directory", () => {
+    const { config, cache } = populated();
+
+    deleteCredentialConfig(config, cache);
+
+    expect(existsSync(config)).toBe(false);
+    expect(existsSync(cache)).toBe(false);
+  });
+
+  // The caller turns "did not throw" into "safe to snapshot", so this is the one
+  // function whose silent partial success would put a live token into an image
+  // every task in the project boots from. The post-condition is checked rather
+  // than inferred from rmSync not having thrown.
+  it("throws when something it deleted is still on disk", () => {
+    const { config, cache } = populated();
+    swallowRmSync = true;
+    try {
+      expect(() => deleteCredentialConfig(config, cache)).toThrow(/credential wipe left/);
+      // Names what survived, since that is the whole diagnostic once the sandbox
+      // is gone: the config first, because it is the token that mints others.
+      expect(() => deleteCredentialConfig(config, cache)).toThrow(config);
+    } finally {
+      swallowRmSync = false;
+    }
+    expect(existsSync(config)).toBe(true);
+  });
+
+  // Called on the failure path too, and a second call must not turn a failed
+  // prepare into a different error.
+  it("is a no-op when there is nothing to delete", () => {
+    const { config, cache } = populated();
+    deleteCredentialConfig(config, cache);
+
+    expect(() => deleteCredentialConfig(config, cache)).not.toThrow();
+  });
+
+  // Same rm -rf on the same operator-supplied variable that throng-creds.sh's
+  // check_cache_dir guards, so it refuses the same values. A refusal must leave
+  // the config in place rather than half-wiping: the caller turns the throw into
+  // a failed prepare, and a half-wipe would be reported as a success.
+  //
+  // Every refusal is a string compare between two operator-supplied values, so
+  // each spelling of the same directory has to be tried, not just the canonical
+  // one — mirroring throng-creds.test.ts's "cache directory guard" cases. The
+  // doubled- and trailing-slash entries below exist specifically to prove the
+  // normalising `.replace()` calls run, and run before the equality checks: a
+  // regression that dropped or reordered either would fail only these, while
+  // every exact-spelling case above kept passing.
+  it.each([
+    ["a relative path", () => "relative/cache"],
+    ["the filesystem root", () => "/"],
+    ["a top-level directory", () => "/cache"],
+    ["a path containing ..", () => "/home/user/../cache"],
+    ["/dev/shm", () => "/dev/shm"],
+    ["/dev/shm with a trailing slash", () => "/dev/shm/"],
+    ["a doubled slash collapsing to a top-level directory", () => "//cache"],
+    ["a trailing slash collapsing to a top-level directory", () => "/cache/"],
+  ])("refuses %s and deletes nothing", (_label, cacheFor) => {
+    const { config } = populated();
+
+    expect(() => deleteCredentialConfig(config, cacheFor())).toThrow(/refusing/);
+    expect(existsSync(config)).toBe(true);
+  });
+
+  it("refuses $HOME, the config directory and the workspace", () => {
+    const { config } = populated();
+    const home = dirname(dirname(config));
+    const savedHome = process.env.HOME;
+    const savedWorkspace = process.env.WORKSPACE_DIR;
+    process.env.HOME = home;
+    delete process.env.WORKSPACE_DIR;
+    try {
+      expect(() => deleteCredentialConfig(config, home)).toThrow(/\$HOME/);
+      expect(() => deleteCredentialConfig(config, dirname(config))).toThrow(/credential config/);
+      expect(() => deleteCredentialConfig(config, join(home, "workspace"))).toThrow(/workspace/);
+      process.env.WORKSPACE_DIR = "/mnt/work";
+      expect(() => deleteCredentialConfig(config, "/mnt/work")).toThrow(/workspace/);
+      expect(existsSync(config)).toBe(true);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      if (savedWorkspace === undefined) delete process.env.WORKSPACE_DIR;
+      else process.env.WORKSPACE_DIR = savedWorkspace;
+    }
+  });
+
+  // The cases above pass a canonical $HOME and misspell the cachePath under
+  // test; these do the opposite, misspelling $HOME itself while the cachePath
+  // passed in is the canonical value. The two exercise different `.replace()`
+  // call sites — the one that normalises `cachePath` up front, and the one
+  // inside `same()` that normalises each comparison value — and a regression
+  // in either alone would leave the other passing.
+  it.each([
+    ["with a trailing slash", (home: string) => `${home}/`],
+    ["with a doubled slash", (home: string) => `${dirname(home)}//${basename(home)}`],
+  ])("refuses $HOME %s and deletes nothing", (_label, spelling) => {
+    const { config } = populated();
+    const home = dirname(dirname(config));
+    const savedHome = process.env.HOME;
+    process.env.HOME = spelling(home);
+    try {
+      expect(() => deleteCredentialConfig(config, home)).toThrow(/\$HOME/);
+      expect(existsSync(config)).toBe(true);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    }
   });
 });

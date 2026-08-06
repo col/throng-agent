@@ -1,4 +1,11 @@
-export type LifecycleState = "uninitialised" | "booting" | "cloning" | "setup" | "ready" | "failed";
+export type LifecycleState =
+  | "uninitialised"
+  | "booting"
+  | "cloning"
+  | "setup"
+  | "prepared"
+  | "ready"
+  | "failed";
 
 export interface FailureDetail {
   step: string;
