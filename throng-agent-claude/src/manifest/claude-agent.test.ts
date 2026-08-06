@@ -54,13 +54,30 @@ describe("validateClaudeAgent", () => {
     }
   });
 
-  it("resolves plugins into channels", () => {
+  it("resolves marketplace plugins into the enabled-plugins channel", () => {
+    const r = validateClaudeAgent(
+      {
+        agent: {
+          plugins: [{ name: "sp", marketplace: "obra/superpowers-marketplace", ref: "v1" }],
+          auth: { type: "api_key", token: "sk" },
+        },
+      },
+      {},
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(Object.keys(r.agent.plugins.marketplaces)).toEqual(["superpowers-marketplace"]);
+      expect(r.agent.plugins.enabledPlugins).toEqual({ "sp@superpowers-marketplace": true });
+    }
+  });
+
+  it("rejects a pre-installed plugin path, which the wrapper cannot express", () => {
     const r = validateClaudeAgent(
       { agent: { plugins: [{ path: "/opt/p" }], auth: { type: "api_key", token: "sk" } } },
       {},
     );
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.agent.plugins.local).toHaveLength(1);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors[0]!.field).toBe("agent.plugins[0].path");
   });
 
   it("accepts bypassPermissions as a permission mode", () => {

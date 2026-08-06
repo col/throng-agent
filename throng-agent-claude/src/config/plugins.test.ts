@@ -16,7 +16,7 @@ function errs(entries: unknown): Array<{ field: string; reason: string }> {
 describe("resolvePlugins", () => {
   it("treats an absent list as no plugins", () => {
     const r = ok(undefined);
-    expect(r).toEqual({ local: [], marketplaces: {}, enabledPlugins: {}, unpinned: [] });
+    expect(r).toEqual({ marketplaces: {}, enabledPlugins: {}, unpinned: [] });
   });
 
   it("maps owner/repo to a github source and derives the marketplace id", () => {
@@ -40,10 +40,10 @@ describe("resolvePlugins", () => {
     expect(r.enabledPlugins).toEqual({ "internal@mk": true });
   });
 
-  it("routes a bare path to the local channel", () => {
-    const r = ok([{ path: "/opt/plugins/baked-in" }]);
-    expect(r.local).toEqual([{ type: "local", path: "/opt/plugins/baked-in" }]);
-    expect(r.marketplaces).toEqual({});
+  it("rejects a pre-installed path, which the wrapper cannot express", () => {
+    const e = errs([{ path: "/opt/plugins/baked-in" }]);
+    expect(e[0]!.field).toBe("agent.plugins[0].path");
+    expect(e[0]!.reason).toMatch(/not supported/);
   });
 
   it("collapses two plugins from the same marketplace into one entry", () => {
@@ -101,17 +101,12 @@ describe("resolvePlugins", () => {
 
   it("rejects an entry mixing path with marketplace fields", () => {
     const e = errs([{ path: "/opt/p", name: "a", marketplace: "org/mk" }]);
-    expect(e[0]!.reason).toMatch(/not both/);
-  });
-
-  it("rejects an entry with neither path nor marketplace", () => {
-    expect(errs([{}])[0]!.reason).toMatch(/requires either "path"/);
-  });
-
-  it("rejects a relative local path", () => {
-    const e = errs([{ path: "plugins/foo" }]);
     expect(e[0]!.field).toBe("agent.plugins[0].path");
-    expect(e[0]!.reason).toMatch(/absolute path/);
+    expect(e[0]!.reason).toMatch(/not supported/);
+  });
+
+  it("rejects an entry with neither name nor marketplace", () => {
+    expect(errs([{}])[0]!.reason).toMatch(/requires both "name" and "marketplace"/);
   });
 
   it("rejects a marketplace that is neither owner/repo nor https", () => {
@@ -130,7 +125,7 @@ describe("resolvePlugins", () => {
   });
 
   it("reports every bad entry at once, with indexed field paths", () => {
-    const e = errs([{ path: "relative" }, {}, { name: "x", marketplace: "" }]);
+    const e = errs([{ path: "/opt/p" }, {}, { name: "x", marketplace: "" }]);
     expect(e.map((x) => x.field)).toEqual([
       "agent.plugins[0].path",
       "agent.plugins[1]",

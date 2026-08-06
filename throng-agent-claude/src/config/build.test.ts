@@ -35,9 +35,8 @@ describe("buildAgentConfig", () => {
 
   // The wrapper defaults marketplaces/enabledPlugins to {}, and omits the SDK
   // settings tier entirely while they are empty — so "no plugins" is {}, not unset.
-  it("leaves both plugin channels empty when no plugins are configured", () => {
+  it("leaves the plugin channel empty when no plugins are configured", () => {
     const cfg = buildAgentConfig(manifest({}), "/work/app");
-    expect(cfg.claude.plugins).toBeUndefined();
     expect(cfg.claude.marketplaces).toEqual({});
     expect(cfg.claude.enabledPlugins).toEqual({});
   });
@@ -53,25 +52,19 @@ describe("buildAgentConfig", () => {
       },
     });
     expect(cfg.claude.enabledPlugins).toEqual({ "superpowers@superpowers-marketplace": true });
-    // A marketplace plugin must not leak into the local-path channel, which
-    // the wrapper validates for on-disk existence.
-    expect(cfg.claude.plugins).toBeUndefined();
   });
 
-  it("routes pre-installed paths to claude.plugins", () => {
-    const cfg = buildAgentConfig(manifest({}, resolved([{ path: "/opt/plugins/baked-in" }])), "/work/app");
-    expect(cfg.claude.plugins).toEqual([{ type: "local", path: "/opt/plugins/baked-in" }]);
-    expect(cfg.claude.marketplaces).toEqual({});
-  });
-
-  it("carries both channels at once", () => {
+  it("carries several marketplaces at once", () => {
     const plugins = resolved([
       { name: "sp", marketplace: "obra/superpowers-marketplace", ref: "v1.0.12" },
-      { path: "/opt/plugins/baked-in" },
+      { name: "hs", marketplace: "acme/house-style", ref: "v2" },
     ]);
     const cfg = buildAgentConfig(manifest({}, plugins), "/work/app");
-    expect(cfg.claude.plugins).toHaveLength(1);
-    expect(Object.keys(cfg.claude.marketplaces!)).toEqual(["superpowers-marketplace"]);
+    expect(Object.keys(cfg.claude.marketplaces!).sort()).toEqual(["house-style", "superpowers-marketplace"]);
+    expect(cfg.claude.enabledPlugins).toEqual({
+      "sp@superpowers-marketplace": true,
+      "hs@house-style": true,
+    });
   });
 
   it("overlays known agent keys onto claude config", () => {
@@ -85,7 +78,7 @@ describe("buildAgentConfig", () => {
       }),
       "/work/app",
     );
-    expect(cfg.claude.model.name).toBe("claude-sonnet-5");
+    expect(cfg.claude.model).toBe("claude-sonnet-5");
     expect(cfg.claude.permissionMode).toBe("plan");
     expect(cfg.claude.systemPromptAppend).toBe("Be terse.");
     expect(cfg.claude.allowedTools).toEqual(["Read", "Bash"]);
@@ -139,17 +132,22 @@ describe("buildAgentConfig", () => {
     }
   });
 
-  it("maps effort onto claude.model.effort", () => {
-    const cfg = buildAgentConfig(manifest({ model: "claude-opus-4-8", effort: "xhigh" }), "/work/app");
-    expect(cfg.claude.model.effort).toBe("xhigh");
+  it("maps the model name onto claude.model as a plain string", () => {
+    const cfg = buildAgentConfig(manifest({ model: "claude-opus-4-8" }), "/work/app");
+    expect(cfg.claude.model).toBe("claude-opus-4-8");
   });
 
-  it("maps adaptive thinking onto claude.model.thinking", () => {
+  it("maps effort onto claude.effort", () => {
+    const cfg = buildAgentConfig(manifest({ model: "claude-opus-4-8", effort: "xhigh" }), "/work/app");
+    expect(cfg.claude.effort).toBe("xhigh");
+  });
+
+  it("maps adaptive thinking onto claude.thinking", () => {
     const cfg = buildAgentConfig(
       manifest({ model: "claude-opus-4-8", thinking: { type: "adaptive" } }),
       "/work/app",
     );
-    expect(cfg.claude.model.thinking).toEqual({ type: "adaptive" });
+    expect(cfg.claude.thinking).toEqual({ type: "adaptive" });
   });
 
   it("renames budget_tokens to budgetTokens for enabled thinking", () => {
@@ -157,16 +155,23 @@ describe("buildAgentConfig", () => {
       manifest({ thinking: { type: "enabled", budget_tokens: 8000 } }),
       "/work/app",
     );
-    expect(cfg.claude.model.thinking).toEqual({ type: "enabled", budgetTokens: 8000 });
+    expect(cfg.claude.thinking).toEqual({ type: "enabled", budgetTokens: 8000 });
   });
 
-  it("creates the model group from thinking/effort even without a model name", () => {
+  it("sets thinking and effort even without a model name", () => {
     const cfg = buildAgentConfig(
       manifest({ thinking: { type: "disabled" }, effort: "low" }),
       "/work/app",
     );
-    expect(cfg.claude.model.name).toBeUndefined();
-    expect(cfg.claude.model.thinking).toEqual({ type: "disabled" });
-    expect(cfg.claude.model.effort).toBe("low");
+    expect(cfg.claude.model).toBeUndefined();
+    expect(cfg.claude.thinking).toEqual({ type: "disabled" });
+    expect(cfg.claude.effort).toBe("low");
+  });
+
+  // The wrapper only fills in thinking.display — leaving `display` unset here is
+  // what lets it do that, and is why thinking sideband events carry any text.
+  it("leaves thinking.display to the wrapper", () => {
+    const cfg = buildAgentConfig(manifest({ thinking: { type: "adaptive" } }), "/work/app");
+    expect(cfg.claude.thinking).not.toHaveProperty("display");
   });
 });

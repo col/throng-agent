@@ -32,25 +32,25 @@ export function buildAgentConfig(
     settingSources: ["project"],
   };
 
-  // Model group: the model name plus the reasoning controls (thinking/effort)
-  // that a2a-claude nests inside ClaudeModelConfig. Accumulate, then attach only
-  // if something was set — an absent model still falls through to the wrapper
-  // default, and thinking/effort work even without an explicit model name.
-  const model: NonNullable<ClaudeConfig["model"]> = {};
-  if (typeof a.model === "string") model.name = a.model;
+  // Model and the reasoning controls are three sibling fields on ClaudeConfig:
+  // `model` is a plain string, with `thinking` and `effort` alongside it. Each
+  // is attached only when the manifest set it, so anything absent falls through
+  // to the wrapper's own default.
+  if (typeof a.model === "string") claude.model = a.model;
   if (a.thinking && typeof a.thinking === "object") {
     const t = a.thinking as Record<string, unknown>;
     // The `enabled` form renames snake_case budget_tokens -> the SDK's
-    // budgetTokens; adaptive/disabled carry only `type`.
-    model.thinking =
+    // budgetTokens; adaptive/disabled carry only `type`. `display` is left
+    // unset on purpose: the wrapper fills in "summarized" whenever thinking
+    // sideband events are on, which is what makes them carry any text at all.
+    claude.thinking =
       t.type === "enabled"
         ? { type: "enabled", budgetTokens: t.budget_tokens as number }
         : { type: t.type as "adaptive" | "disabled" };
   }
   if (typeof a.effort === "string") {
-    model.effort = a.effort as NonNullable<ClaudeConfig["model"]>["effort"];
+    claude.effort = a.effort as ClaudeConfig["effort"];
   }
-  if (Object.keys(model).length > 0) claude.model = model;
   if (typeof a.permission_mode === "string") {
     claude.permissionMode = a.permission_mode as ClaudePermissionMode;
     // bypassPermissions grants Claude unrestricted tool access; the SDK requires
@@ -58,11 +58,10 @@ export function buildAgentConfig(
     // runs in an isolated, Throng-controlled container.
     if (a.permission_mode === "bypassPermissions") claude.dangerouslyAllowBypassPermissions = true;
   }
-  // Plugins arrive already partitioned by resolvePlugins (see src/config/plugins.ts):
-  // pre-installed directories go to claude.plugins, marketplace plugins to the
-  // settings-backed channel the SDK installs from.
-  const { local, marketplaces, enabledPlugins } = manifest.agent.plugins;
-  if (local.length > 0) claude.plugins = local;
+  // Marketplace plugins go to the settings-backed channel the SDK installs
+  // from (see src/config/plugins.ts). Pre-installed plugin directories are not
+  // supported — a2a-claude exposes no such field.
+  const { marketplaces, enabledPlugins } = manifest.agent.plugins;
   if (Object.keys(marketplaces).length > 0) {
     claude.marketplaces = marketplaces;
     claude.enabledPlugins = enabledPlugins;
