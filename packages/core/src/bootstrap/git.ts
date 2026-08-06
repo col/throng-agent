@@ -92,8 +92,15 @@ export async function syncOrClone(url: string, dest: string, ref: string): Promi
 
   // Not this repository: a stale directory from a previous project layout, a
   // repo that was re-pointed at a different remote, or a plain directory in the
-  // way. `dest` is always `workspaceRoot` + a validated relative path with no
-  // `..` segments (see validateRepos), so this cannot escape the workspace.
+  // way.
+  //
+  // Two guarantees from validateRepos make this `rm -rf` safe, and BOTH are
+  // needed. No `..` segments and no leading `/` keep `dest` from escaping the
+  // workspace — but that alone permits `dest: "."`, which `join` collapses to
+  // the workspace root, so this would delete the whole workspace and every repo
+  // synced before it in the caller's loop. The dest rules therefore also reject
+  // any spelling that resolves to the root, which is what makes `dest` strictly
+  // BELOW `workspaceRoot` rather than merely inside it.
   try {
     rmSync(dest, { recursive: true, force: true });
   } catch (err) {

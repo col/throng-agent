@@ -231,6 +231,22 @@ function validateRepos(value: unknown, errors: FieldError[]): void {
       errors.push({ field: `repos[${i}].dest`, reason: "must be a relative path (absolute paths are rejected)" });
     } else if (dest.split("/").includes("..")) {
       errors.push({ field: `repos[${i}].dest`, reason: "must not contain '..' path segments" });
+    } else if (dest.split("/").every((s) => s === "" || s === ".")) {
+      // "." and "./" pass every check above — non-empty, not absolute, no ".."
+      // segments — but `join(workspaceRoot, ".")` collapses to the workspace root
+      // itself, and syncOrClone deletes a destination that is not already a work
+      // tree for the same remote. So this one input turns into `rm -rf` of the
+      // whole workspace, taking with it every repo cloned earlier in the same
+      // loop. It is rejected rather than special-cased downstream because the
+      // dest rules are the only place that owns what a destination may name.
+      //
+      // Not a behaviour regression: before syncOrClone existed this was a hard
+      // `git clone` failure ("destination path already exists"), so no working
+      // caller can be sending it.
+      errors.push({
+        field: `repos[${i}].dest`,
+        reason: "must name a subdirectory of the workspace, not the workspace itself",
+      });
     }
     if (typeof repo.primary !== "boolean") {
       errors.push({ field: `repos[${i}].primary`, reason: "must be a boolean" });

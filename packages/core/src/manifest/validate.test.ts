@@ -383,6 +383,32 @@ describe("validatePrepare", () => {
   });
 });
 
+// A shared rule, so it is pinned on both routes at once. `join(workspaceRoot, ".")`
+// is the workspace root itself, and syncOrClone removes a destination that is not
+// already a work tree for the same remote — so accepting this would turn one
+// manifest field into `rm -rf` of the whole workspace, including repos synced
+// earlier in the same loop. Before syncOrClone it was a plain clone failure.
+describe("repos[].dest may not resolve to the workspace root", () => {
+  const initialise = (dest: string) =>
+    validate({ repos: [{ url: "https://x/y", ref: "main", dest, primary: true }], agent: { platform: "test" } }, registry, {});
+  const prepare = (dest: string) =>
+    validatePrepare({ ...preparePayload, repos: [{ ...preparePayload.repos[0], dest }] }, {});
+
+  it.each([".", "./"])("is rejected by both routes for %j", (dest) => {
+    for (const r of [initialise(dest), prepare(dest)]) {
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.errors.map((e) => e.field)).toContain("repos[0].dest");
+    }
+  });
+
+  // The guard must not catch an ordinary nested destination, which is the shape
+  // a multi-repo project actually sends.
+  it("still accepts a nested dest on both routes", () => {
+    expect(initialise("services/api").ok).toBe(true);
+    expect(prepare("services/api").ok).toBe(true);
+  });
+});
+
 describe("validate (credential-bearing repo urls stay legal on initialise)", () => {
   // The counterpart to the prepare rejection above. This form is deliberate
   // input on /api/initialise — the fixtures in this repo use it and redactTokens
