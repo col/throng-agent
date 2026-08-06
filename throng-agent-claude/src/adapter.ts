@@ -28,13 +28,12 @@ export class ClaudeEngineAdapter
         "no credential resolved from agent.auth or the environment; agent requests will fail unless another auth path is configured",
       );
     }
-    const { marketplaces, local, unpinned, enabledPlugins } = manifest.agent.plugins;
+    const { marketplaces, unpinned, enabledPlugins } = manifest.agent.plugins;
     const marketplaceCount = Object.keys(marketplaces).length;
-    if (marketplaceCount > 0 || local.length > 0) {
+    if (marketplaceCount > 0) {
       log.info("plugins configured", {
         marketplaces: marketplaceCount,
         marketplacePlugins: Object.keys(enabledPlugins).length,
-        localPlugins: local.length,
       });
     }
     if (unpinned.length > 0) {

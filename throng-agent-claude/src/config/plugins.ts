@@ -1,19 +1,18 @@
 import type { FieldError } from "@throng/agent-core";
 
 /**
- * Translates the manifest's ergonomic `agent.plugins` list into the two
- * channels a2a-claude exposes: `claude.plugins` for directories already on
- * disk, and `claude.marketplaces` + `claude.enabledPlugins` for plugins the
- * SDK fetches itself.
+ * Translates the manifest's ergonomic `agent.plugins` list into the channel
+ * a2a-claude exposes: `claude.marketplaces` + `claude.enabledPlugins`, from
+ * which the SDK fetches and installs the plugins itself.
  *
  * All the ergonomics live here rather than in the wrapper, which stays a thin
  * passthrough of SDK-shaped config.
+ *
+ * Pre-installed plugin directories (`{ "path": … }`) are not supported: the
+ * wrapper has no field for them. Such entries are rejected with a FieldError
+ * rather than dropped, so a manifest that asks for one fails loudly at
+ * validation instead of booting an agent that is quietly missing a plugin.
  */
-
-export interface LocalPlugin {
-  type: "local";
-  path: string;
-}
 
 /** Mirrors the SDK's extraKnownMarketplaces[].source union (github | git). */
 export type MarketplaceSource =
@@ -21,8 +20,6 @@ export type MarketplaceSource =
   | { source: "git"; url: string; ref?: string };
 
 export interface ResolvedPlugins {
-  /** Pre-installed plugin directories → claude.plugins. */
-  local: LocalPlugin[];
   /** Marketplace id → source, deduped across entries. */
   marketplaces: Record<string, { source: MarketplaceSource }>;
   /** "<plugin>@<marketplace-id>" → true. */
@@ -36,7 +33,6 @@ export type PluginResolution =
   | { ok: false; errors: FieldError[] };
 
 export const EMPTY_PLUGINS: ResolvedPlugins = {
-  local: [],
   marketplaces: {},
   enabledPlugins: {},
   unpinned: [],
@@ -83,7 +79,6 @@ export function resolvePlugins(value: unknown): PluginResolution {
     return { ok: false, errors: [{ field: "agent.plugins", reason: "must be a list" }] };
   }
 
-  const local: LocalPlugin[] = [];
   const marketplaces: Record<string, { source: MarketplaceSource }> = {};
   const enabledPlugins: Record<string, boolean> = {};
   const unpinned: string[] = [];
@@ -97,34 +92,18 @@ export function resolvePlugins(value: unknown): PluginResolution {
       return;
     }
 
-    const hasPath = "path" in entry;
-    const hasRemote = "name" in entry || "marketplace" in entry;
-    if (hasPath && hasRemote) {
+    if ("path" in entry) {
       errors.push({
-        field: at,
-        reason: 'must be either { "path" } for a pre-installed plugin or { "name", "marketplace" } for a marketplace plugin, not both',
+        field: `${at}.path`,
+        reason: 'is not supported — pre-installed plugin directories have no equivalent in the wrapper. Use { "name", "marketplace" } so the SDK installs the plugin itself',
       });
       return;
     }
-    if (!hasPath && !hasRemote) {
+    if (!("name" in entry) && !("marketplace" in entry)) {
       errors.push({
         field: at,
-        reason: 'requires either "path" or both "name" and "marketplace"',
+        reason: 'requires both "name" and "marketplace"',
       });
-      return;
-    }
-
-    if (hasPath) {
-      if (!nonEmptyString(entry.path)) {
-        errors.push({ field: `${at}.path`, reason: "must be a non-empty string" });
-      } else if (!entry.path.startsWith("/")) {
-        errors.push({
-          field: `${at}.path`,
-          reason: "must be an absolute path (it is resolved inside the container, not against the workspace)",
-        });
-      } else {
-        local.push({ type: "local", path: entry.path });
-      }
       return;
     }
 
@@ -197,5 +176,5 @@ export function resolvePlugins(value: unknown): PluginResolution {
   });
 
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, resolved: { local, marketplaces, enabledPlugins, unpinned } };
+  return { ok: true, resolved: { marketplaces, enabledPlugins, unpinned } };
 }
