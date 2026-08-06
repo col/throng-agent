@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homeDir } from "../env.js";
 import type { BaseManifest } from "../manifest/types.js";
@@ -54,4 +54,72 @@ export function writeCredentialConfig(manifest: BaseManifest, path = CONFIG_PATH
   // token, chmod both unconditionally rather than trusting that we made them.
   chmodSync(dirname(path), 0o700);
   chmodSync(path, 0o600);
+}
+
+/**
+ * Where throng-creds caches the tokens it mints. Mirrors the helper's
+ * `${THRONG_CREDS_CACHE:-$HOME/.throng/cache}` exactly — the runtime deletes what
+ * the helper writes, and a disagreement would leave live tokens in a snapshot.
+ *
+ * A function, not a module constant like CONFIG_PATH: resolving `$HOME` at import
+ * would throw for a consumer that sets THRONG_CONFIG and has no HOME, which is a
+ * supported configuration today.
+ */
+export function credsCachePath(): string {
+  return process.env.THRONG_CREDS_CACHE || join(homeDir(), ".throng", "cache");
+}
+
+/**
+ * Removes the credential config and every token minted from it.
+ *
+ * This is a security boundary, not tidiness. `/api/prepare` calls it before
+ * reporting `prepared`, and what it leaves behind is captured into an E2B
+ * snapshot that every task in the project boots from — so a token that survives
+ * here is a token shared with every future task, stored on E2B's infrastructure.
+ *
+ * Validates before it deletes: a refusal must not leave the config gone and the
+ * cache intact, because the caller reports the throw as a failed prepare and a
+ * half-wipe would then be indistinguishable from a clean one.
+ */
+export function deleteCredentialConfig(
+  configPath = CONFIG_PATH,
+  cachePath = credsCachePath(),
+): void {
+  assertDeletableCacheDir(cachePath, configPath);
+  rmSync(configPath, { force: true });
+  rmSync(cachePath, { recursive: true, force: true });
+}
+
+/**
+ * The same refusals `throng-creds.sh`'s `check_cache_dir` makes, for the same
+ * reason: this is an `rm -rf` on a path that comes from an operator-supplied
+ * environment variable, and `${CACHE_DIR:?}` only rejects an empty value, never a
+ * dangerous one. Nothing makes an arbitrary path safe; these are the values that
+ * end a machine or a task.
+ */
+function assertDeletableCacheDir(cachePath: string, configPath: string): void {
+  // Collapse repeated and trailing slashes first: every check below is a string
+  // compare between two operator-supplied values, and "/cache/" has the same
+  // parent as "/run/cache" until it is normalised.
+  const dir = cachePath.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1");
+  const refuse = (why: string): never => {
+    throw new Error(`refusing '${cachePath}' as the credential cache directory: ${why}.`);
+  };
+
+  if (!dir.startsWith("/")) refuse("it is not an absolute path");
+  const segments = dir.split("/");
+  if (segments.includes(".") || segments.includes("..")) refuse("it contains '.' or '..'");
+  // Two segments minimum: "/", "/cache" and "/tmp" are refused,
+  // "/home/user/.throng/cache" — the default — is not.
+  if (segments.length < 3) refuse("it is too close to the filesystem root");
+
+  const same = (other: string | undefined): boolean =>
+    other !== undefined && other !== "" && other.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1") === dir;
+
+  if (same(process.env.HOME)) refuse("it is $HOME, which also holds the credential config and the workspace");
+  if (same(dirname(configPath))) refuse("it holds the write-once credential config");
+  const home = process.env.HOME;
+  const workspace = process.env.WORKSPACE_DIR || (home ? join(home, "workspace") : "");
+  if (same(workspace)) refuse("it is the workspace the repos were cloned into");
+  if (same("/dev/shm")) refuse("it is a tmpfs mount shared with the whole sandbox");
 }

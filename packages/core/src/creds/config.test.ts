@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { writeCredentialConfig } from "./config.js";
+import { credsCachePath, deleteCredentialConfig, writeCredentialConfig } from "./config.js";
 import type { BaseManifest } from "../manifest/types.js";
 
 function manifest(over: Partial<BaseManifest> = {}): BaseManifest {
@@ -193,5 +193,103 @@ describe("CONFIG_PATH", () => {
     process.env.HOME = "/home/user";
 
     expect(await reimport()).toBe("/home/user/.throng/config.json");
+  });
+});
+
+describe("credsCachePath", () => {
+  const originalCache = process.env.THRONG_CREDS_CACHE;
+  const originalHome = process.env.HOME;
+  afterEach(() => {
+    if (originalCache === undefined) delete process.env.THRONG_CREDS_CACHE;
+    else process.env.THRONG_CREDS_CACHE = originalCache;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  });
+
+  // Must agree with throng-creds.sh's ${THRONG_CREDS_CACHE:-$HOME/.throng/cache}:
+  // the runtime deletes what the helper writes, and a disagreement would leave
+  // live tokens in the snapshot while every test still passed.
+  it("defaults to $HOME/.throng/cache", () => {
+    delete process.env.THRONG_CREDS_CACHE;
+    process.env.HOME = "/home/user";
+
+    expect(credsCachePath()).toBe("/home/user/.throng/cache");
+  });
+
+  it("honours THRONG_CREDS_CACHE, and treats a blank value as unset", () => {
+    process.env.HOME = "/home/user";
+    process.env.THRONG_CREDS_CACHE = "/mnt/cache";
+    expect(credsCachePath()).toBe("/mnt/cache");
+    process.env.THRONG_CREDS_CACHE = "";
+    expect(credsCachePath()).toBe("/home/user/.throng/cache");
+  });
+});
+
+describe("deleteCredentialConfig", () => {
+  function populated(): { config: string; cache: string } {
+    const dir = mkdtempSync(join(tmpdir(), "throng-wipe-"));
+    const config = join(dir, ".throng", "config.json");
+    const cache = join(dir, ".throng", "cache");
+    writeCredentialConfig(manifest({ credentials: { url: "https://cp", token: "tok" } }), config);
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, "git_github.com_acme_app"), "9999999999\nkey\nusername=x\npassword=ghs_live\n");
+    return { config, cache };
+  }
+
+  it("removes the config file and the whole cache directory", () => {
+    const { config, cache } = populated();
+
+    deleteCredentialConfig(config, cache);
+
+    expect(existsSync(config)).toBe(false);
+    expect(existsSync(cache)).toBe(false);
+  });
+
+  // Called on the failure path too, and a second call must not turn a failed
+  // prepare into a different error.
+  it("is a no-op when there is nothing to delete", () => {
+    const { config, cache } = populated();
+    deleteCredentialConfig(config, cache);
+
+    expect(() => deleteCredentialConfig(config, cache)).not.toThrow();
+  });
+
+  // Same rm -rf on the same operator-supplied variable that throng-creds.sh's
+  // check_cache_dir guards, so it refuses the same values. A refusal must leave
+  // the config in place rather than half-wiping: the caller turns the throw into
+  // a failed prepare, and a half-wipe would be reported as a success.
+  it.each([
+    ["a relative path", () => "relative/cache"],
+    ["the filesystem root", () => "/"],
+    ["a top-level directory", () => "/cache"],
+    ["a path containing ..", () => "/home/user/../cache"],
+    ["/dev/shm", () => "/dev/shm"],
+  ])("refuses %s and deletes nothing", (_label, cacheFor) => {
+    const { config } = populated();
+
+    expect(() => deleteCredentialConfig(config, cacheFor())).toThrow(/refusing/);
+    expect(existsSync(config)).toBe(true);
+  });
+
+  it("refuses $HOME, the config directory and the workspace", () => {
+    const { config } = populated();
+    const home = dirname(dirname(config));
+    const savedHome = process.env.HOME;
+    const savedWorkspace = process.env.WORKSPACE_DIR;
+    process.env.HOME = home;
+    delete process.env.WORKSPACE_DIR;
+    try {
+      expect(() => deleteCredentialConfig(config, home)).toThrow(/\$HOME/);
+      expect(() => deleteCredentialConfig(config, dirname(config))).toThrow(/credential config/);
+      expect(() => deleteCredentialConfig(config, join(home, "workspace"))).toThrow(/workspace/);
+      process.env.WORKSPACE_DIR = "/mnt/work";
+      expect(() => deleteCredentialConfig(config, "/mnt/work")).toThrow(/workspace/);
+      expect(existsSync(config)).toBe(true);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+      if (savedWorkspace === undefined) delete process.env.WORKSPACE_DIR;
+      else process.env.WORKSPACE_DIR = savedWorkspace;
+    }
   });
 });
