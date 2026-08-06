@@ -54,6 +54,75 @@ describe("control server", () => {
       else process.env.THRONG_INIT_TOKEN = prev;
     }
   });
+
+  it("POST /api/prepare valid → 202 booting", async () => {
+    const res = await request(app())
+      .post("/api/prepare")
+      .send({ repos: goodRepos, setup_commands: ["mise install"] });
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ status: "booting" });
+  });
+
+  it("POST /api/prepare with an agent block → 400 list", async () => {
+    const res = await request(app())
+      .post("/api/prepare")
+      .send({ repos: goodRepos, agent: { platform: "claude" } });
+    expect(res.status).toBe(400);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body.map((e: { field: string }) => e.field)).toContain("agent");
+  });
+
+  // The control plane's Oban retry maps 409 to :ok, so this has to be a clean
+  // "already done" rather than a 400 or a second run.
+  it("POST /api/prepare twice → 409", async () => {
+    const server = createControlApp({ taskRun: new TaskRun(bootDeps, { claude: adapter }) });
+    await request(server).post("/api/prepare").send({ repos: goodRepos });
+
+    const res = await request(server).post("/api/prepare").send({ repos: goodRepos });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: "already_prepared" });
+  });
+
+  it("POST /api/prepare 401 when THRONG_INIT_TOKEN set", async () => {
+    const prev = process.env.THRONG_INIT_TOKEN;
+    process.env.THRONG_INIT_TOKEN = "secret";
+    try {
+      const res = await request(app()).post("/api/prepare").send({ repos: goodRepos });
+      expect(res.status).toBe(401);
+    } finally {
+      if (prev === undefined) delete process.env.THRONG_INIT_TOKEN;
+      else process.env.THRONG_INIT_TOKEN = prev;
+    }
+  });
+
+  // Mirrors the coverage server.ts's shared error handler needs for
+  // /api/initialise: the malformed-JSON branch sits before both routes, so a
+  // bad body on /api/prepare must fail the same way, not 404 or 500.
+  it("POST /api/prepare malformed JSON → 400 list", async () => {
+    const res = await request(app())
+      .post("/api/prepare")
+      .set("Content-Type", "application/json")
+      .send("{not json");
+    expect(res.status).toBe(400);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  // What the control plane's boot poller reads to decide the sandbox is ready to
+  // snapshot, and what an /api/initialise is then still allowed from.
+  it("GET /api/status reports prepared, and /api/initialise still works from it", async () => {
+    const server = createControlApp({ taskRun: new TaskRun(bootDeps, { claude: adapter }) });
+    await request(server).post("/api/prepare").send({ repos: goodRepos });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect((await request(server).get("/api/status")).body.state).toBe("prepared");
+
+    const init = await request(server)
+      .post("/api/initialise")
+      .send({ repos: goodRepos, agent: { platform: "claude" } });
+
+    expect(init.status).toBe(202);
+  });
 });
 
 // Saved once, restored after every case: these tests are about process-global
