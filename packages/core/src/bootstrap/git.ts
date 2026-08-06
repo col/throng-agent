@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, realpathSync, rmSync } from "node:fs";
+import { lstatSync, realpathSync, rmSync } from "node:fs";
 
 /**
  * `op` names the git subcommand that failed, so a caller can say which step of a
@@ -78,7 +78,14 @@ export function revParseHead(dest: string): Promise<GitResult> {
  * them throws away the speedup this exists to deliver.
  */
 export async function syncOrClone(url: string, dest: string, ref: string): Promise<GitResult> {
-  if (!existsSync(dest)) return cloneFresh(url, dest, ref);
+  // `lstatSync`, not `existsSync`: `existsSync` follows symlinks, so a dangling
+  // one at `dest` would read as "absent" even though the directory entry is
+  // real — `clone` then fails outright with "could not create work tree dir:
+  // File exists". `lstatSync` looks at the entry itself, so a dangling symlink
+  // falls through to the "not this repo" branch below and gets removed. A
+  // valid symlink to a matching work tree still resolves to that work tree in
+  // `worktreeOrigin` (which does follow it) and still syncs, unchanged.
+  if (lstatSync(dest, { throwIfNoEntry: false }) === undefined) return cloneFresh(url, dest, ref);
 
   const origin = await worktreeOrigin(dest);
   if (origin !== null && sameRemote(origin, url)) return sync(dest, ref);

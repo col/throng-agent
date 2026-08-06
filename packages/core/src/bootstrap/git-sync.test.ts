@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -108,6 +108,24 @@ describe("syncOrClone (dest is the same repo)", () => {
     expect(existsSync(join(dest, "marker"))).toBe(true);
   });
 
+  // The manifest's repos[].url may carry a token that differs from the one
+  // baked into the stored origin (a fresh mint each fetch — see `clone`'s
+  // comment). This still has to compare equal to the stored origin, or a
+  // routine token refresh would delete the workspace and re-clone it. Works
+  // because the sync path fetches through the STORED origin, not the passed
+  // url, so the credential in the passed url is never actually used here.
+  it("treats a credential-bearing url as the same remote rather than re-cloning", async () => {
+    const src = makeSourceRepo();
+    const dest = join(tmp(), "web");
+    await syncOrClone(`file://${src}`, dest, "main");
+    writeFileSync(join(dest, "marker"), "survives");
+
+    const r = await syncOrClone(`file://x-access-token:ghs_0123456789abcdefghij@${src}`, dest, "main");
+
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(dest, "marker"))).toBe(true);
+  });
+
   // `ref` is a free-form string: a tag or SHA has no origin/<ref>, so the reset
   // is skipped rather than failing the boot. Checkout has already put the work
   // tree at an exact commit by then.
@@ -172,5 +190,39 @@ describe("syncOrClone (dest exists but is not this repo)", () => {
     expect(r.ok).toBe(true);
     expect(existsSync(join(dest, "stale"))).toBe(false);
     expect(existsSync(join(dest, ".git"))).toBe(true);
+  });
+
+  // `existsSync` follows symlinks, so a dangling one at `dest` reads as
+  // "absent" and a bare `clone` there fails with "could not create work tree
+  // dir: File exists" — the directory entry is real even though the target
+  // isn't. This is exactly the "something is already there" case the
+  // rm-and-reclone fallback exists for.
+  it("removes a dangling symlink at dest and clones fresh", async () => {
+    const src = makeSourceRepo();
+    const dest = join(tmp(), "web");
+    symlinkSync(join(tmp(), "nowhere"), dest);
+
+    const r = await syncOrClone(`file://${src}`, dest, "main");
+
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(dest, ".git"))).toBe(true);
+    expect(readme(dest)).toBe("one");
+  });
+});
+
+describe("syncOrClone (origin unreachable)", () => {
+  // A realistic snapshot-boot failure: the remote has gone away between the
+  // snapshot build and the task boot that restores from it. `op` exists so a
+  // caller can say which step of the sync failed rather than just "it failed".
+  it("fails with op \"fetch\" when origin cannot be reached", async () => {
+    const src = makeSourceRepo();
+    const dest = join(tmp(), "web");
+    await syncOrClone(`file://${src}`, dest, "main");
+    execFileSync("rm", ["-rf", src]);
+
+    const r = await syncOrClone(`file://${src}`, dest, "main");
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.op).toBe("fetch");
   });
 });
