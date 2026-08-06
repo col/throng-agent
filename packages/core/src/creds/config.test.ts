@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { credsCachePath, deleteCredentialConfig, writeCredentialConfig } from "./config.js";
 import type { BaseManifest } from "../manifest/types.js";
@@ -258,12 +258,23 @@ describe("deleteCredentialConfig", () => {
   // check_cache_dir guards, so it refuses the same values. A refusal must leave
   // the config in place rather than half-wiping: the caller turns the throw into
   // a failed prepare, and a half-wipe would be reported as a success.
+  //
+  // Every refusal is a string compare between two operator-supplied values, so
+  // each spelling of the same directory has to be tried, not just the canonical
+  // one — mirroring throng-creds.test.ts's "cache directory guard" cases. The
+  // doubled- and trailing-slash entries below exist specifically to prove the
+  // normalising `.replace()` calls run, and run before the equality checks: a
+  // regression that dropped or reordered either would fail only these, while
+  // every exact-spelling case above kept passing.
   it.each([
     ["a relative path", () => "relative/cache"],
     ["the filesystem root", () => "/"],
     ["a top-level directory", () => "/cache"],
     ["a path containing ..", () => "/home/user/../cache"],
     ["/dev/shm", () => "/dev/shm"],
+    ["/dev/shm with a trailing slash", () => "/dev/shm/"],
+    ["a doubled slash collapsing to a top-level directory", () => "//cache"],
+    ["a trailing slash collapsing to a top-level directory", () => "/cache/"],
   ])("refuses %s and deletes nothing", (_label, cacheFor) => {
     const { config } = populated();
 
@@ -290,6 +301,29 @@ describe("deleteCredentialConfig", () => {
       else process.env.HOME = savedHome;
       if (savedWorkspace === undefined) delete process.env.WORKSPACE_DIR;
       else process.env.WORKSPACE_DIR = savedWorkspace;
+    }
+  });
+
+  // The cases above pass a canonical $HOME and misspell the cachePath under
+  // test; these do the opposite, misspelling $HOME itself while the cachePath
+  // passed in is the canonical value. The two exercise different `.replace()`
+  // call sites — the one that normalises `cachePath` up front, and the one
+  // inside `same()` that normalises each comparison value — and a regression
+  // in either alone would leave the other passing.
+  it.each([
+    ["with a trailing slash", (home: string) => `${home}/`],
+    ["with a doubled slash", (home: string) => `${dirname(home)}//${basename(home)}`],
+  ])("refuses $HOME %s and deletes nothing", (_label, spelling) => {
+    const { config } = populated();
+    const home = dirname(dirname(config));
+    const savedHome = process.env.HOME;
+    process.env.HOME = spelling(home);
+    try {
+      expect(() => deleteCredentialConfig(config, home)).toThrow(/\$HOME/);
+      expect(existsSync(config)).toBe(true);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
     }
   });
 });

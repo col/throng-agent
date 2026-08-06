@@ -80,6 +80,15 @@ export function credsCachePath(): string {
  * Validates before it deletes: a refusal must not leave the config gone and the
  * cache intact, because the caller reports the throw as a failed prepare and a
  * half-wipe would then be indistinguishable from a clean one.
+ *
+ * The config is deleted before the cache, deliberately and not just as written
+ * order: config.json holds the long-lived instance identity token, which can
+ * mint further GitHub credentials, while the cache holds only short-lived
+ * tokens already derived from it — so removing the ability to mint more comes
+ * first. That ordering cannot protect against an `rmSync` that throws for an
+ * unrelated OS reason (permissions, a busy mount) after the first delete
+ * succeeds; there is no atomic way to remove both. Either throw fails the
+ * `/api/prepare` call, so no snapshot is taken from a sandbox left half wiped.
  */
 export function deleteCredentialConfig(
   configPath = CONFIG_PATH,
