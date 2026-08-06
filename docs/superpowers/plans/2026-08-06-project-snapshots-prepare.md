@@ -1209,8 +1209,10 @@ argument"` case with:
 ```ts
   // Sync runs WITH credentials in place under the pull model, and its output
   // lands verbatim in the control plane's instance.error_message — the same sink
-  // the setup path already redacts. `op` names which git command failed, which is
-  // the only thing lost by collapsing clone and checkout into one dep.
+  // the setup path already redacts. Collapsing clone and checkout into one dep
+  // costs nothing diagnostically: `op` names the failing git command and the ref
+  // is carried alongside it, so the message still identifies both the operation
+  // and what it was operating on.
   it.each([
     ["clone", "fatal: could not read Username for 'https://ghs_0123456789abcdefghij@github.com'"],
     ["checkout", "error: pathspec not found; remote was https://x-access-token:ghp_0123456789abcdefghij@github.com"],
@@ -1322,7 +1324,7 @@ Replace the `boot` method (lines 58–139) with the split version:
       this.lifecycle.set("ready");
       log.info("boot complete; agent is ready");
     } catch (err) {
-      this.failFrom(err);
+      this.reportFailure(err);
     }
   }
 
@@ -1387,7 +1389,7 @@ Replace the `boot` method (lines 58–139) with the split version:
     }
   }
 
-  private failFrom(err: unknown): void {
+  private reportFailure(err: unknown): void {
     const detail =
       err instanceof StepError
         ? { step: err.step, message: err.message }
@@ -1805,7 +1807,7 @@ Everything after that guard is unchanged. Then add `prepare()` and
           message: wipeErr instanceof Error ? wipeErr.message : String(wipeErr),
         });
       }
-      this.failFrom(err);
+      this.reportFailure(err);
     }
   }
 ```
