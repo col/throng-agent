@@ -64,6 +64,11 @@ export class TaskRun {
       return { ok: false, errors: result.errors };
     }
 
+    // Nothing may `await` between the guard above and this line — see the longer
+    // note in prepare(), which this shares: the synchronous run from the state
+    // check to the transition is the whole of what makes the check atomic against
+    // concurrent POSTs, and an `await` introduced in between would let two
+    // callers past it and would break silently.
     this.lifecycle.set("booting");
     log.info("initialise accepted; booting asynchronously", {
       platform: result.manifest.platform,

@@ -661,11 +661,13 @@ describe("throng-creds cache directory guard", () => {
   });
 
   // Sharper version of the same argument. Everything else erase destroys is
-  // re-mintable on the next operation; config.json is not. It is written once at
-  // initialise and there is no rotation path into a running sandbox, so losing
-  // it does not cost a round trip — it takes away the only identity the sandbox
-  // will ever have. Checked against the resolved config path, so it holds for a
-  // THRONG_CONFIG that points somewhere else entirely.
+  // re-mintable on the next operation; config.json is not. Nothing inside a
+  // running sandbox rewrites it — the one path that replaces it is
+  // /api/initialise on a sandbox restored from a project snapshot, which is a
+  // boot rather than a rotation — so losing it does not cost a round trip, it
+  // takes away the only identity this run will ever have. Checked against the
+  // resolved config path, so it holds for a THRONG_CONFIG that points somewhere
+  // else entirely.
   //
   // Every refusal here is a string compare between two operator-supplied values,
   // so each spelling of the same directory has to be tried: the doubled-slash

@@ -279,12 +279,23 @@ legal on `/api/initialise`. git writes the clone URL verbatim into
 is the one place the credential wipe below cannot reach.
 
 It responds `202 {"status":"booting"}` and reports progress through the same
-`GET /api/status` states as `/api/initialise` (`cloning`, `setup`), settling at a
-new terminal state, **`prepared`**. Before reporting it, the credential config and
-the whole token cache are deleted and then re-checked to be gone — if that
-deletion fails, so does the prepare. It never injects engine credentials and never
-starts the A2A server. A second `/api/prepare` is a `409`, which the control plane
-treats as success, because the job that drives it has to be safe to retry.
+`GET /api/status` states as `/api/initialise` (`booting`, `cloning`, `setup`),
+settling at a new terminal state, **`prepared`**. Before reporting it, the
+credential config and the whole token cache are deleted and then re-checked to be
+gone — if that deletion fails, so does the prepare. It never injects engine
+credentials and never starts the A2A server. A second `/api/prepare` is a `409`,
+which the control plane treats as success, because the job that drives it has to
+be safe to retry.
+
+That wipe covers what the agent runtime itself writes — `$HOME/.throng` — and
+nothing else. `setup_commands` run **with live credentials by design**, so
+anything one of them chooses to persist elsewhere in `$HOME` (an `~/.npmrc` with
+a registry token, a `~/.config/gh/hosts.yml` from a `gh auth login`, a
+`~/.git-credentials` from a command that sets `credential.helper store`) lands in
+the snapshot untouched: the wipe does not go looking for it. Nothing on the
+default path does this — the image configures only `throng-creds`, whose `store`
+mode discards what git hands it — so this is a property of the commands a project
+supplies, and worth checking before enabling snapshots for one.
 
 `prepared` is a rest state, not a failure state: a sandbox restored from a
 snapshot resumes there and accepts exactly one `/api/initialise`, which is what

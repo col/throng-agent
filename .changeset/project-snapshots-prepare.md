@@ -37,7 +37,22 @@ and cloned fresh. `checkout -f` discards modifications to tracked files, which a
 normally has because `npm ci` and `mix deps.get` rewrite lockfiles; there is deliberately no
 `git clean`, so the untracked build output a prepare leaves behind — the entire point of the snapshot
 — survives. The reset is skipped for a `ref` with no `origin/<ref>`, so a tag or SHA still works.
-Existing boots take the clone branch and are unaffected.
+Existing boots take the clone branch and are behaviourally unaffected.
+
+Behaviourally, not byte-identically: two things an existing boot can emit have changed shape, without
+any change to which manifests succeed or fail. A failed repo sync now reports
+`git <op> failed for <dest>@<ref> (exit <code>): …` — it names the ref, and a failed checkout carries
+an exit code it never used to — which reaches operators as `instance.error_message`, so log-matching
+tooling keyed on the old wording needs updating. And the `400` body from `/api/initialise` lists the
+same errors in a different order, because the shared `validateWorkspace` now runs the `github_token`,
+`credentials` and `setup_commands` checks ahead of the agent-routing errors and `user_identity` after
+them. The set of `{field, reason}` pairs is unchanged; only the array order is.
+
+`repos[].dest` gains one rejection on both routes: a value that resolves to the workspace root itself
+(`"."`, `"./"`). `join(workspaceRoot, ".")` is the workspace root, and `syncOrClone` removes a
+destination that is not already a work tree for the same remote, so this would delete the whole
+workspace including repos synced earlier in the same manifest. It was a `git clone` failure before
+`syncOrClone` existed, so it has never been usable input.
 
 New from the package root: `syncOrClone`, `validatePrepare`, `deleteCredentialConfig`,
 `credsCachePath`, and the `WorkspaceManifest`, `PrepareValidateResult`, `BootAcceptance` and

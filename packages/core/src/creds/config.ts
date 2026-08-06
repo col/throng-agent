@@ -96,6 +96,16 @@ export function credsCachePath(): string {
  * live token behind. Config-first means no NEW helper can mint after the first
  * delete, so the exposure is at most the round trips already in flight, and the
  * post-condition below catches any that land before it runs.
+ *
+ * **Removing the cache is load-bearing for throng-creds.sh, not merely tidy.**
+ * The helper gives a literal `github_token` a 10-year cache TTL (`STATIC_TTL`),
+ * which was safe when a sandbox's config was written exactly once. Prepare and
+ * restore break that: this run writes token A and may mint a decade-long cache
+ * entry from it, and the restored sandbox's `/api/initialise` writes a different
+ * token B to the same path. Wiping both together here is what stops an entry
+ * minted from A outliving A — narrowing this to `configPath` alone would leave
+ * every task in the project authenticating as the prepare instance, silently and
+ * for ten years. `STATIC_TTL` carries the same note pointing back here.
  */
 export function deleteCredentialConfig(
   configPath = CONFIG_PATH,
@@ -146,6 +156,10 @@ function assertDeletableCacheDir(cachePath: string, configPath: string): void {
     other !== undefined && other !== "" && other.replace(/\/{2,}/g, "/").replace(/(.)\/+$/, "$1") === dir;
 
   if (same(process.env.HOME)) refuse("it is $HOME, which also holds the credential config and the workspace");
+  // "write-once" is once per boot, not once per sandbox image: a snapshot
+  // restore rewrites this file with a different token at /api/initialise. Within
+  // one run it still holds — nothing re-mints the identity, so losing the file
+  // takes away the only identity this run will ever have.
   if (same(dirname(configPath))) refuse("it holds the write-once credential config");
   const home = process.env.HOME;
   const workspace = process.env.WORKSPACE_DIR || (home ? join(home, "workspace") : "");

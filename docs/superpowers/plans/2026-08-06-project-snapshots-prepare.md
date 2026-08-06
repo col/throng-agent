@@ -78,9 +78,10 @@ instance. The snapshot is taken only once the agent reports `prepared`.
 
 ---
 
-## Four places this plan follows the code rather than the spec
+## Six places this plan follows the code rather than the spec
 
-Report these back; §5 was written before either half existed.
+Report these back; §5 was written before either half existed. Items 4 and 6 were
+added after the fact — 4 by the whole-branch review, 6 late in Task 4.
 
 1. **`git reset --hard origin/<ref>` is conditional, not unconditional.** `ref` is
    a free-form string. A tag or a SHA has no `origin/<ref>`, so an unconditional
@@ -97,12 +98,28 @@ Report these back; §5 was written before either half existed.
    string compare treats `…/web` and `…/web.git` as a mismatch and throws the
    whole snapshot away. Task 1 compares with userinfo, trailing `/` and trailing
    `.git` stripped.
-4. **`user_identity` is rejected by `/api/prepare`, not ignored.** The spec only
+4. **`repos[].dest` may no longer resolve to the workspace root.** Not in the
+   spec at all, and found by the whole-branch review: `dest: "."` passed every
+   rule (non-empty, not absolute, no `..`), and `join(workspaceRoot, ".")` is the
+   workspace root — so Task 1's remove-and-clone-fresh branch would `rm -rf` the
+   whole workspace, including repos synced earlier in the same manifest. A seam
+   between Task 1, which introduced the `rm`, and Task 4, which owns the dest
+   rules. Rejected in `validateRepos`, so both routes get it. It was a hard
+   `git clone` failure before `syncOrClone` existed, so no working caller sends it.
+5. **`user_identity` is rejected by `/api/prepare`, not ignored.** The spec only
    requires rejecting `agent`. Same rule and same reason: a prepare manifest
    carrying an initialise-only field is an initialise manifest sent to the wrong
    route, and a `git config --global` write is exactly what §4 keeps out of a
    shared image. `prepare_payload/2` never sends it, so this cannot break the real
    caller. It is one `if` in Task 4 if you'd rather it were ignored.
+6. **`/api/prepare` also rejects a credential-bearing `repos[].url`**, which
+   `/api/initialise` still accepts. `git clone` writes the URL verbatim into
+   `<dest>/.git/config`, inside the workspace the snapshot captures, where the
+   credential wipe — which only touches `$HOME/.throng` — cannot reach it. The
+   asymmetry is deliberate: on a task sandbox the same URL is a logging concern
+   `redactTokens` already covers, and rejecting it there would send new `400`s to
+   an unchanged control plane. Lives in `validatePrepare`, not in the shared
+   `validateRepos`.
 
 ---
 
@@ -388,8 +405,15 @@ export async function syncOrClone(url: string, dest: string, ref: string): Promi
 
   // Not this repository: a stale directory from a previous project layout, a
   // repo that was re-pointed at a different remote, or a plain directory in the
-  // way. `dest` is always `workspaceRoot` + a validated relative path with no
-  // `..` segments (see validateRepos), so this cannot escape the workspace.
+  // way.
+  //
+  // Two guarantees from validateRepos make this `rm -rf` safe, and BOTH are
+  // needed. No `..` segments and no leading `/` keep `dest` from escaping the
+  // workspace — but that alone permits `dest: "."`, which `join` collapses to
+  // the workspace root, so this would delete the whole workspace and every repo
+  // synced before it in the caller's loop. The dest rules therefore also reject
+  // any spelling that resolves to the root, which is what makes `dest` strictly
+  // BELOW `workspaceRoot` rather than merely inside it. (See Task 4.)
   try {
     rmSync(dest, { recursive: true, force: true });
   } catch (err) {
@@ -1085,8 +1109,54 @@ function crossFieldRepoErrors(repos: Array<Record<string, unknown>>): FieldError
 
 Note the `github_token` block moved out of `validate()` into `validateWorkspace`,
 and the two cross-field rules moved into `crossFieldRepoErrors`. Delete both from
-`validate()`; the version above already has them removed. `validateRepos`,
+`validate()`; the version above already has them removed.
 `validateUserIdentity` and `validateCredentials` are unchanged.
+
+`validateRepos` gains one branch, after the existing `..` check — a shared rule,
+so both routes get it. Task 1's `rmSync` depends on it:
+
+```ts
+    } else if (dest.split("/").every((s) => s === "" || s === ".")) {
+      // "." and "./" pass every check above — non-empty, not absolute, no ".."
+      // segments — but `join(workspaceRoot, ".")` collapses to the workspace root
+      // itself, and syncOrClone deletes a destination that is not already a work
+      // tree for the same remote. So this one input turns into `rm -rf` of the
+      // whole workspace, taking with it every repo cloned earlier in the same
+      // loop. It is rejected rather than special-cased downstream because the
+      // dest rules are the only place that owns what a destination may name.
+      //
+      // Not a behaviour regression: before syncOrClone existed this was a hard
+      // `git clone` failure ("destination path already exists"), so no working
+      // caller can be sending it.
+      errors.push({
+        field: `repos[${i}].dest`,
+        reason: "must name a subdirectory of the workspace, not the workspace itself",
+      });
+    }
+```
+
+with a test pinning both routes at once:
+
+```ts
+describe("repos[].dest may not resolve to the workspace root", () => {
+  const initialise = (dest: string) =>
+    validate({ repos: [{ url: "https://x/y", ref: "main", dest, primary: true }], agent: { platform: "test" } }, registry, {});
+  const prepare = (dest: string) =>
+    validatePrepare({ ...preparePayload, repos: [{ ...preparePayload.repos[0], dest }] }, {});
+
+  it.each([".", "./"])("is rejected by both routes for %j", (dest) => {
+    for (const r of [initialise(dest), prepare(dest)]) {
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.errors.map((e) => e.field)).toContain("repos[0].dest");
+    }
+  });
+
+  it("still accepts a nested dest on both routes", () => {
+    expect(initialise("services/api").ok).toBe(true);
+    expect(prepare("services/api").ok).toBe(true);
+  });
+});
+```
 
 Then replace `buildManifest` at the bottom of the file with:
 
@@ -2096,12 +2166,23 @@ legal on `/api/initialise`. git writes the clone URL verbatim into
 is the one place the credential wipe below cannot reach.
 
 It responds `202 {"status":"booting"}` and reports progress through the same
-`GET /api/status` states as `/api/initialise` (`cloning`, `setup`), settling at a
-new terminal state, **`prepared`**. Before reporting it, the credential config and
-the whole token cache are deleted and then re-checked to be gone — if that
-deletion fails, so does the prepare. It never injects engine credentials and never
-starts the A2A server. A second `/api/prepare` is a `409`, which the control plane
-treats as success, because the job that drives it has to be safe to retry.
+`GET /api/status` states as `/api/initialise` (`booting`, `cloning`, `setup`),
+settling at a new terminal state, **`prepared`**. Before reporting it, the
+credential config and the whole token cache are deleted and then re-checked to be
+gone — if that deletion fails, so does the prepare. It never injects engine
+credentials and never starts the A2A server. A second `/api/prepare` is a `409`,
+which the control plane treats as success, because the job that drives it has to
+be safe to retry.
+
+That wipe covers what the agent runtime itself writes — `$HOME/.throng` — and
+nothing else. `setup_commands` run **with live credentials by design**, so
+anything one of them chooses to persist elsewhere in `$HOME` (an `~/.npmrc` with
+a registry token, a `~/.config/gh/hosts.yml` from a `gh auth login`, a
+`~/.git-credentials` from a command that sets `credential.helper store`) lands in
+the snapshot untouched: the wipe does not go looking for it. Nothing on the
+default path does this — the image configures only `throng-creds`, whose `store`
+mode discards what git hands it — so this is a property of the commands a project
+supplies, and worth checking before enabling snapshots for one.
 
 `prepared` is a rest state, not a failure state: a sandbox restored from a
 snapshot resumes there and accepts exactly one `/api/initialise`, which is what
@@ -2164,7 +2245,22 @@ and cloned fresh. `checkout -f` discards modifications to tracked files, which a
 normally has because `npm ci` and `mix deps.get` rewrite lockfiles; there is deliberately no
 `git clean`, so the untracked build output a prepare leaves behind — the entire point of the snapshot
 — survives. The reset is skipped for a `ref` with no `origin/<ref>`, so a tag or SHA still works.
-Existing boots take the clone branch and are unaffected.
+Existing boots take the clone branch and are behaviourally unaffected.
+
+Behaviourally, not byte-identically: two things an existing boot can emit have changed shape, without
+any change to which manifests succeed or fail. A failed repo sync now reports
+`git <op> failed for <dest>@<ref> (exit <code>): …` — it names the ref, and a failed checkout carries
+an exit code it never used to — which reaches operators as `instance.error_message`, so log-matching
+tooling keyed on the old wording needs updating. And the `400` body from `/api/initialise` lists the
+same errors in a different order, because the shared `validateWorkspace` now runs the `github_token`,
+`credentials` and `setup_commands` checks ahead of the agent-routing errors and `user_identity` after
+them. The set of `{field, reason}` pairs is unchanged; only the array order is.
+
+`repos[].dest` gains one rejection on both routes: a value that resolves to the workspace root itself
+(`"."`, `"./"`). `join(workspaceRoot, ".")` is the workspace root, and `syncOrClone` removes a
+destination that is not already a work tree for the same remote, so this would delete the whole
+workspace including repos synced earlier in the same manifest. It was a `git clone` failure before
+`syncOrClone` existed, so it has never been usable input.
 
 New from the package root: `syncOrClone`, `validatePrepare`, `deleteCredentialConfig`,
 `credsCachePath`, and the `WorkspaceManifest`, `PrepareValidateResult`, `BootAcceptance` and
@@ -2207,8 +2303,47 @@ The four tests §9 of the design asks for, and where they live:
 | A manifest carrying an `agent` block is rejected | `manifest/validate.test.ts`; `task-run.test.ts`; `control/server.test.ts` |
 
 Plus: `npm run build && npm run typecheck && npm test` all green, and both changes
-are no-ops for an existing boot — `syncOrClone` takes its clone branch when
-`dest` is absent, which is every task sandbox not restored from a snapshot, and
-`/api/prepare` is simply unused until the control plane's `snapshot_enabled`
-toggle is turned on.
-````
+are behavioural no-ops for an existing boot — `syncOrClone` takes its clone branch
+when `dest` is absent, which is every task sandbox not restored from a snapshot,
+and `/api/prepare` is simply unused until the control plane's `snapshot_enabled`
+toggle is turned on. Two things an existing boot *emits* did change shape, without
+changing which manifests succeed or fail: a failed repo sync's message now names
+the ref and carries an exit code on the checkout branch, and `/api/initialise`'s
+`400` body lists the same errors in a different array order. Both are recorded in
+the changeset.
+
+---
+
+## Post-review amendments
+
+Found by the whole-branch review, after Task 8. Nothing here blocked the feature;
+each is a seam between tasks that neither side owned.
+
+1. **`repos[].dest: "."` would `rm -rf` the workspace.** Fixed in `validateRepos`
+   (Task 4 above, which now carries the branch and its test) with the matching
+   comment at Task 1's `rmSync`. A seam: Task 1 introduced the `rm`, Task 4 owns
+   the dest rules.
+2. **`throng-creds.sh` justified its 10-year `STATIC_TTL` with a "config is
+   written once per sandbox" invariant that prepare→restore→initialise makes
+   false.** The outcome stays correct only because `deleteCredentialConfig`
+   removes the cache *and* the config together, which is a TypeScript function
+   the bash file never mentioned. Comment-only, in four places, naming the
+   dependency in both directions: `throng-creds.sh`'s `STATIC_TTL` and its
+   "write-once" refusal, `creds/config.ts`'s `deleteCredentialConfig` docstring
+   and its matching refusal, and the mirrored comment in `throng-creds.test.ts`.
+3. **The "nothing may `await` between the guard and `lifecycle.set`" note lived
+   only on `prepare()`.** It governs `initialise()` identically. `initialise()`
+   gains a short cross-reference rather than a second copy.
+4. **The README over-promised the wipe.** It covers `$HOME/.throng` — what the
+   runtime writes — and nothing else; `setup_commands` run with live credentials
+   by design and can persist their own elsewhere in `$HOME`. Said plainly in the
+   README section, alongside the existing honesty about the *memory* residue.
+   Also: prepare passes through `booting` as well as `cloning` and `setup`.
+5. **The changeset's "unaffected" was stated in absolute terms.** Softened to
+   "behaviourally unaffected", with a paragraph naming the two wire-visible
+   changes above and one for the new `dest` rejection.
+
+Considered and dismissed: `/api/prepare` returning `already_prepared` when the
+lifecycle is `failed` rather than `prepared`. The control plane maps `409` to
+`:ok` and reads the truth from `/api/status`, and the shape matches the existing
+`already_initialised`.

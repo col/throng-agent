@@ -41,10 +41,23 @@ set -uo pipefail
 CONFIG_FILE="${THRONG_CONFIG:-}"
 CACHE_DIR="${THRONG_CREDS_CACHE:-}"
 SKEW=300              # serve_until = expires_at - SKEW
-# 10 years, for a literal github_token. Never expiring is safe because
-# the config file is written once when the sandbox is created and never
-# again: a changed static token cannot appear in a running sandbox, so a cache
-# entry minted from it can never go stale relative to its source.
+# 10 years, for a literal github_token. Never expiring is safe only because a
+# cache entry cannot outlive the config it was minted from.
+#
+# That used to follow from the config being written exactly once per sandbox. It
+# no longer does. /api/prepare writes a config, may mint a 10-year entry from it,
+# and is then snapshotted; a sandbox restored from that snapshot takes an
+# /api/initialise which writes a DIFFERENT token to the same path. So a stale
+# entry — one still serving the prepare instance's token to every task in the
+# project, for ten years — is now reachable in principle.
+#
+# What closes it is deleteCredentialConfig() in creds/config.ts, which /api/prepare
+# calls before reporting `prepared`: it removes this cache directory AND the config
+# together, and verifies both are gone, so nothing minted before the snapshot
+# survives into it. That is a cross-language invariant — a change there that
+# narrowed the wipe to config.json alone would silently make this TTL unsafe, and
+# the failure would be invisible for as long as the token kept working. If that
+# wipe ever stops removing the cache, this value has to stop being a decade.
 STATIC_TTL=315360000
 # × 0.2s = 15s before giving up on the lock. Overridable only so the test suite
 # can assert the wait-then-reclaim-then-proceed behaviour without spending 15s a
@@ -162,9 +175,11 @@ check_cache_dir() {
     "it is \$HOME, which also holds the credential config and the workspace"
   # The config directory, for a sharper version of the same argument. Everything
   # else an erase destroys is re-mintable on the next operation; config.json is
-  # not. It is written once at initialise and there is no rotation path into a
-  # running sandbox, so losing it takes away the only identity the sandbox will
-  # ever have.
+  # not. Nothing inside a running sandbox can rewrite it — the one path that
+  # replaces it is /api/initialise on a sandbox restored from a project snapshot,
+  # which is a boot, not a rotation — so losing it takes away the only identity
+  # this run will ever have. ("write-once" in the message below is that: once per
+  # boot, not once per sandbox image.)
   refuse_cache_dir "${CONFIG_FILE%/*}" "it holds the write-once credential config"
   # The workspace, which is what the $HOME rule above is really protecting and
   # which sits one segment below it. This is the only place the helper looks at
