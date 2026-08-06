@@ -1974,14 +1974,73 @@ git commit -m "feat(control): add POST /api/prepare"
 In `packages/core/src/index.ts`:
 
 ```ts
-export { TaskRun, type BootDeps, type BootAcceptance, type InitialiseResult, type PrepareResult } from "./task-run.js";
+export {
+  TaskRun,
+  type BootDeps,
+  type BootAcceptance,
+  type InitialiseResult,
+  type PrepareResult,
+} from "./task-run.js";
 export { validate, validatePrepare } from "./manifest/validate.js";
 export { clone, checkout, syncOrClone, type GitResult } from "./bootstrap/git.js";
-export { writeCredentialConfig, deleteCredentialConfig, credsCachePath, CONFIG_PATH } from "./creds/config.js";
+export {
+  writeCredentialConfig,
+  deleteCredentialConfig,
+  credsCachePath,
+  CONFIG_PATH,
+} from "./creds/config.js";
 ```
 
 and add `WorkspaceManifest` and `PrepareValidateResult` to the existing
-`export type { … } from "./manifest/types.js"` block.
+`export type { … } from "./manifest/types.js"` block. `revParseHead` stays
+unexported: it was already private before this change and nothing here needs it.
+
+- [ ] **Step 1b: Two more `validatePrepare` cases**
+
+The suite from Task 4 is representative rather than exhaustive. Add to
+`packages/core/src/manifest/validate.test.ts`, inside `describe("validatePrepare", …)`:
+
+```ts
+  // Both, not just the first. These are two independent pushes onto one error
+  // list, and the validators in this file report every bad field at once so a
+  // caller with two mistakes gets one complete 400 rather than a second round
+  // trip — an early return between them would still pass the two cases above.
+  it("reports both agent and user_identity when a manifest carries both", () => {
+    const fields = errorsOf({
+      ...preparePayload,
+      agent: { platform: "claude" },
+      user_identity: { name: "A", email: "a@b.c" },
+    }).map((e) => e.field);
+
+    expect(fields).toContain("agent");
+    expect(fields).toContain("user_identity");
+  });
+```
+
+```ts
+  // The two rules the suite above reaches only through `validate`: one cross-field
+  // and one per-field. Both routes call the same helpers, so what this catches is
+  // a wiring regression specific to validatePrepare — the cross-field pass
+  // dropped, or `repos` handed to it where the whole input belongs.
+  //
+  // Separate calls, deliberately: crossFieldRepoErrors runs only once every
+  // per-field check has passed, so a manifest carrying both mistakes would report
+  // github_token alone and the dest rule would never be exercised.
+  it("applies the shared dest-uniqueness and github_token rules", () => {
+    const duplicated = {
+      ...preparePayload,
+      repos: [
+        { url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true },
+        { url: "https://github.com/acme/api.git", ref: "main", dest: "web", primary: false },
+      ],
+    };
+    expect(errorsOf(duplicated).map((e) => e.field)).toContain("repos[].dest");
+
+    expect(errorsOf({ ...preparePayload, github_token: 1 }).map((e) => e.field)).toContain(
+      "github_token",
+    );
+  });
+```
 
 - [ ] **Step 2: Verify the package still builds and typechecks**
 
@@ -1990,7 +2049,19 @@ Expected: PASS everywhere.
 
 - [ ] **Step 3: Document the route**
 
-In `README.md`, after the `### Running standalone` subsection and before
+In `README.md`, two edits to the existing `### credentials, github_token and
+user_identity` section, which the new route makes incomplete:
+
+- the `user_identity` bullet gains "It is an initialise-only field:
+  `/api/prepare` rejects it, for the reasons in *Preparing a workspace* below."
+- "Whichever mode is in play, `/api/initialise` writes what the helper needs to…"
+  becomes "Whichever mode is in play, `/api/initialise` — and `/api/prepare` —
+  writes what the helper needs to…", and the paragraph ends with "`/api/prepare`
+  deletes both `$HOME/.throng` paths again before it finishes, since what it
+  leaves on disk is captured into an image every task in the project boots from;
+  see *Preparing a workspace* below."
+
+Then, after the `### Running standalone` subsection and before
 `## What's in the box?`, add:
 
 ````markdown
@@ -2017,11 +2088,20 @@ project and is stored by the sandbox provider, so no agent configuration, no LLM
 credential and no commit identity may be baked into one; a manifest carrying them
 is an initialise manifest sent to the wrong route.
 
+Every other field is validated by exactly the rules `/api/initialise` applies,
+with one addition: a `repos[].url` that embeds a credential
+(`https://x-access-token:ghs_…@github.com/…`) is a `400` here, though it stays
+legal on `/api/initialise`. git writes the clone URL verbatim into
+`<dest>/.git/config`, which sits inside the workspace the snapshot captures and
+is the one place the credential wipe below cannot reach.
+
 It responds `202 {"status":"booting"}` and reports progress through the same
 `GET /api/status` states as `/api/initialise` (`cloning`, `setup`), settling at a
 new terminal state, **`prepared`**. Before reporting it, the credential config and
-the whole token cache are deleted — if that deletion fails, so does the prepare.
-It never injects engine credentials and never starts the A2A server.
+the whole token cache are deleted and then re-checked to be gone — if that
+deletion fails, so does the prepare. It never injects engine credentials and never
+starts the A2A server. A second `/api/prepare` is a `409`, which the control plane
+treats as success, because the job that drives it has to be safe to retry.
 
 `prepared` is a rest state, not a failure state: a sandbox restored from a
 snapshot resumes there and accepts exactly one `/api/initialise`, which is what
@@ -2029,12 +2109,15 @@ configures the agent for a specific task. A second one still gets a `409`.
 
 Repositories are synced rather than cloned blind, on both routes: an absent
 destination is cloned and checked out as before, a destination that is already a
-work tree for the same remote is fetched, checked out and reset to
-`origin/<ref>`, and anything else is removed and cloned fresh. There is
-deliberately no `git clean` — the untracked `_build`, `deps` and `node_modules`
-a prepare leaves behind are the entire point of a snapshot. A `ref` that is not a
-branch (a tag or a SHA) is checked out and not reset, since it has no
-`origin/<ref>` to reset to.
+work tree for the same remote is fetched, force-checked-out and reset to
+`origin/<ref>`, and anything else — a different remote, a plain directory, a
+dangling symlink — is removed and cloned fresh. `checkout -f` because a prepared
+workspace is normally dirty (`npm ci` and `mix deps.get` rewrite tracked
+lockfiles, and a plain checkout refuses to switch branches over them); it
+discards modifications to **tracked** files only. There is deliberately no
+`git clean` — the untracked `_build`, `deps` and `node_modules` a prepare leaves
+behind are the entire point of a snapshot. A `ref` that is not a branch (a tag or
+a SHA) is checked out and not reset, since it has no `origin/<ref>` to reset to.
 ````
 
 - [ ] **Step 4: Write the changeset**
@@ -2055,8 +2138,17 @@ deletes the credential config and the whole `throng-creds` token cache and settl
 lifecycle state, `prepared`. It never injects engine credentials and never starts the A2A server. An
 `agent` or `user_identity` block is rejected with a `400` rather than ignored: a snapshot is shared by
 every task in the project and is stored by the sandbox provider, so a manifest carrying either is an
-initialise manifest sent to the wrong route. The wipe is a security boundary — if it fails, the
-prepare fails, because a snapshot with a live credential in it is worse than no snapshot.
+initialise manifest sent to the wrong route. The wipe is a security boundary, so it is verified rather
+than assumed — `deleteCredentialConfig` re-checks that both paths are actually gone instead of
+inferring it from the absence of an exception, and if either survives the prepare fails, because a
+snapshot with a live credential in it is worse than no snapshot.
+
+`/api/prepare` also rejects a `repos[].url` that embeds a credential
+(`https://x-access-token:ghs_…@github.com/…`). `git clone` writes that URL verbatim into
+`<dest>/.git/config`, which lives inside the workspace the snapshot captures, so on this route the
+credential outlives a wipe that only ever touches `$HOME/.throng`. On a task sandbox the same URL is a
+logging concern `redactTokens` already covers and the sandbox dies with the task, so the rule lives in
+`validatePrepare` rather than in the repo rules both routes share.
 
 `prepared` is a terminal *rest* state. A sandbox restored from a snapshot resumes with the lifecycle
 the snapshot captured, so `/api/initialise`'s one-shot guard relaxes from "the lifecycle has left
@@ -2067,16 +2159,25 @@ everything after that guard is unchanged.
 `clone` + `checkout`, so the two cannot drift. An absent `dest` is cloned and checked out exactly as
 before; a `dest` that is already a work tree for the same remote (compared with userinfo, a trailing
 slash and a trailing `.git` normalised away) is fetched, force-checked-out and reset to
-`origin/<ref>`; anything else is removed and cloned fresh. There is deliberately no `git clean` — the
-untracked build output a prepare leaves behind is the entire point of the snapshot — and the reset is
-skipped for a `ref` with no `origin/<ref>`, so a tag or SHA still works. Existing boots take the
-clone branch and are unaffected.
+`origin/<ref>`; anything else — a different remote, a plain directory, a dangling symlink — is removed
+and cloned fresh. `checkout -f` discards modifications to tracked files, which a prepared workspace
+normally has because `npm ci` and `mix deps.get` rewrite lockfiles; there is deliberately no
+`git clean`, so the untracked build output a prepare leaves behind — the entire point of the snapshot
+— survives. The reset is skipped for a `ref` with no `origin/<ref>`, so a tag or SHA still works.
+Existing boots take the clone branch and are unaffected.
+
+New from the package root: `syncOrClone`, `validatePrepare`, `deleteCredentialConfig`,
+`credsCachePath`, and the `WorkspaceManifest`, `PrepareValidateResult`, `BootAcceptance` and
+`PrepareResult` types.
 
 **Breaking (consumers constructing `BootDeps` directly):** `BootDeps.clone` and `BootDeps.checkout`
-are replaced by a single `syncOrClone(url, dest, ref)`, and `BootDeps.deleteCredentialConfig` is now
-required. `defaultBootDeps()` supplies both. `clone` and `checkout` are still exported and unchanged.
-`BaseManifest` now extends a new `WorkspaceManifest` (the same fields minus `user_identity`); nothing
-that consumes a `BaseManifest` changes.
+are replaced by a single `syncOrClone(url, dest, ref)`; `BootDeps.deleteCredentialConfig` is now
+required; and `BootDeps.writeCredentialConfig` now receives a `WorkspaceManifest` rather than a
+`BaseManifest`. `defaultBootDeps()` supplies all of it. `clone` and `checkout` are still exported and
+unchanged, and `validate`'s behaviour is unchanged — in particular the credential-bearing-URL
+rejection above is prepare-only, deliberately, so an unchanged control plane sees no new `400`s on
+`/api/initialise`. `BaseManifest` now extends a new `WorkspaceManifest` (the same fields minus
+`user_identity`); nothing that consumes a `BaseManifest` changes.
 ```
 
 - [ ] **Step 5: Full verification**
@@ -2087,7 +2188,8 @@ Expected: PASS everywhere. Confirm the output before claiming completion.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/core/src/index.ts README.md .changeset/project-snapshots-prepare.md
+git add packages/core/src/index.ts packages/core/src/manifest/validate.test.ts \
+  README.md .changeset/project-snapshots-prepare.md docs/superpowers/plans/2026-08-06-project-snapshots-prepare.md
 git commit -m "docs: document /api/prepare and export the new surface"
 ```
 

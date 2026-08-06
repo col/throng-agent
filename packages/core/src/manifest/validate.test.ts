@@ -301,6 +301,21 @@ describe("validatePrepare", () => {
     expect(fields).toContain("user_identity");
   });
 
+  // Both, not just the first. These are two independent pushes onto one error
+  // list, and the validators in this file report every bad field at once so a
+  // caller with two mistakes gets one complete 400 rather than a second round
+  // trip — an early return between them would still pass the two cases above.
+  it("reports both agent and user_identity when a manifest carries both", () => {
+    const fields = errorsOf({
+      ...preparePayload,
+      agent: { platform: "claude" },
+      user_identity: { name: "A", email: "a@b.c" },
+    }).map((e) => e.field);
+
+    expect(fields).toContain("agent");
+    expect(fields).toContain("user_identity");
+  });
+
   it("applies the same repo rules as initialise", () => {
     expect(errorsOf({ ...preparePayload, repos: [] }).map((e) => e.field)).toContain("repos");
     expect(errorsOf({ repos: preparePayload.repos.map((r) => ({ ...r, primary: false })) }).map((e) => e.field))
@@ -314,6 +329,29 @@ describe("validatePrepare", () => {
       .map((e) => e.field)).toContain("credentials.url");
     expect(errorsOf({ ...preparePayload, setup_commands: [""] }).map((e) => e.field))
       .toContain("setup_commands");
+  });
+
+  // The two rules the suite above reaches only through `validate`: one cross-field
+  // and one per-field. Both routes call the same helpers, so what this catches is
+  // a wiring regression specific to validatePrepare — the cross-field pass
+  // dropped, or `repos` handed to it where the whole input belongs.
+  //
+  // Separate calls, deliberately: crossFieldRepoErrors runs only once every
+  // per-field check has passed, so a manifest carrying both mistakes would report
+  // github_token alone and the dest rule would never be exercised.
+  it("applies the shared dest-uniqueness and github_token rules", () => {
+    const duplicated = {
+      ...preparePayload,
+      repos: [
+        { url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true },
+        { url: "https://github.com/acme/api.git", ref: "main", dest: "web", primary: false },
+      ],
+    };
+    expect(errorsOf(duplicated).map((e) => e.field)).toContain("repos[].dest");
+
+    expect(errorsOf({ ...preparePayload, github_token: 1 }).map((e) => e.field)).toContain(
+      "github_token",
+    );
   });
 
   // Prepare-only, and the asymmetry with initialise is the point. git writes the

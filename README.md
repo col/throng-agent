@@ -165,7 +165,9 @@ it.
   refuses to commit at all ("Author identity unknown"), and an agent will
   improvise one. The field names mirror git's own `[user]` config section —
   `name` rather than `username` deliberately, since in GitHub's vocabulary a
-  username is the account handle (`octocat`), not a display name.
+  username is the account handle (`octocat`), not a display name. It is an
+  initialise-only field: `/api/prepare` rejects it, for the reasons in
+  *Preparing a workspace* below.
 
 Credentials and identity are independent: a commit identity is a git concept,
 unrelated to which token pushes the work, so a manifest may carry either, both,
@@ -174,10 +176,12 @@ or neither.
 `repos[].token` is still accepted but ignored. `throng-creds` scopes every
 request to the repo git is talking to, which a static per-repo token cannot.
 
-Whichever mode is in play, `/api/initialise` writes what the helper needs to
-`$HOME/.throng/config.json` (mode `0600`, in a `0700` directory) and the
-credential cache lives in `$HOME/.throng/cache`. Repos are cloned into
-`$HOME/workspace`.
+Whichever mode is in play, `/api/initialise` — and `/api/prepare` — writes what
+the helper needs to `$HOME/.throng/config.json` (mode `0600`, in a `0700`
+directory) and the credential cache lives in `$HOME/.throng/cache`. Repos are
+cloned into `$HOME/workspace`. `/api/prepare` deletes both `$HOME/.throng` paths
+again before it finishes, since what it leaves on disk is captured into an image
+every task in the project boots from; see *Preparing a workspace* below.
 
 `$HOME` because the sandbox runs unprivileged: the same image runs as root under
 `docker run` but as `uid 1000` under E2B, where `/run` (the original location) is
@@ -243,6 +247,60 @@ docker run -d -p 8080:8080 -p 3030:3030 --name throng-agent \
 
 (`node:20-slim` already has a `node` user at uid 1000 with `/home/node`, which
 stands in for E2B's `user`/`/home/user`.)
+
+## Preparing a workspace (project snapshots)
+
+`POST /api/prepare` warms a sandbox's workspace without initialising an agent, so
+the sandbox can be snapshotted and every later task booted from the result with
+its repositories, toolchains and dependency caches already on disk.
+
+```jsonc
+{
+  "repos": [
+    { "url": "https://github.com/acme/app", "ref": "main", "dest": "app", "primary": true }
+  ],
+  "setup_commands": ["npm install"],
+  "credentials": { "url": "https://…/api/credentials", "token": "…" }
+}
+```
+
+It takes the workspace half of the initialise manifest — `repos`,
+`setup_commands`, and `credentials` or `github_token` — and **rejects** `agent`
+and `user_identity` with a `400`. A snapshot is shared by every task in the
+project and is stored by the sandbox provider, so no agent configuration, no LLM
+credential and no commit identity may be baked into one; a manifest carrying them
+is an initialise manifest sent to the wrong route.
+
+Every other field is validated by exactly the rules `/api/initialise` applies,
+with one addition: a `repos[].url` that embeds a credential
+(`https://x-access-token:ghs_…@github.com/…`) is a `400` here, though it stays
+legal on `/api/initialise`. git writes the clone URL verbatim into
+`<dest>/.git/config`, which sits inside the workspace the snapshot captures and
+is the one place the credential wipe below cannot reach.
+
+It responds `202 {"status":"booting"}` and reports progress through the same
+`GET /api/status` states as `/api/initialise` (`cloning`, `setup`), settling at a
+new terminal state, **`prepared`**. Before reporting it, the credential config and
+the whole token cache are deleted and then re-checked to be gone — if that
+deletion fails, so does the prepare. It never injects engine credentials and never
+starts the A2A server. A second `/api/prepare` is a `409`, which the control plane
+treats as success, because the job that drives it has to be safe to retry.
+
+`prepared` is a rest state, not a failure state: a sandbox restored from a
+snapshot resumes there and accepts exactly one `/api/initialise`, which is what
+configures the agent for a specific task. A second one still gets a `409`.
+
+Repositories are synced rather than cloned blind, on both routes: an absent
+destination is cloned and checked out as before, a destination that is already a
+work tree for the same remote is fetched, force-checked-out and reset to
+`origin/<ref>`, and anything else — a different remote, a plain directory, a
+dangling symlink — is removed and cloned fresh. `checkout -f` because a prepared
+workspace is normally dirty (`npm ci` and `mix deps.get` rewrite tracked
+lockfiles, and a plain checkout refuses to switch branches over them); it
+discards modifications to **tracked** files only. There is deliberately no
+`git clean` — the untracked `_build`, `deps` and `node_modules` a prepare leaves
+behind are the entire point of a snapshot. A `ref` that is not a branch (a tag or
+a SHA) is checked out and not reset, since it has no `origin/<ref>` to reset to.
 
 ## What's in the box?
 

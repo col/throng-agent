@@ -1,7 +1,13 @@
 export { startControlServer, buildServer, createControlApp, defaultBootDeps } from "./control/server.js";
-export { TaskRun, type BootDeps, type InitialiseResult } from "./task-run.js";
+export {
+  TaskRun,
+  type BootDeps,
+  type BootAcceptance,
+  type InitialiseResult,
+  type PrepareResult,
+} from "./task-run.js";
 export { Lifecycle, type LifecycleState, type StatusView, type FailureDetail } from "./lifecycle.js";
-export { validate } from "./manifest/validate.js";
+export { validate, validatePrepare } from "./manifest/validate.js";
 export {
   resolveAuth,
   applyAuth,
@@ -12,17 +18,24 @@ export {
 export type {
   RepoSpec,
   FieldError,
+  WorkspaceManifest,
   BaseManifest,
   Manifest,
   ValidateResult,
+  PrepareValidateResult,
   UserIdentity,
   CredentialsConfig,
 } from "./manifest/types.js";
 export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export { homeDir, type Env } from "./env.js";
-export { clone, checkout, type GitResult } from "./bootstrap/git.js";
+export { clone, checkout, syncOrClone, type GitResult } from "./bootstrap/git.js";
 export { runSetupCommands, describeSetupFailure, redactTokens, type SetupResult } from "./bootstrap/setup.js";
 export { injectGitIdentity } from "./bootstrap/git-identity.js";
-export { writeCredentialConfig, CONFIG_PATH } from "./creds/config.js";
+export {
+  writeCredentialConfig,
+  deleteCredentialConfig,
+  credsCachePath,
+  CONFIG_PATH,
+} from "./creds/config.js";
 export { checkInitToken } from "./control/init-token.js";
 export { log } from "./log.js";
