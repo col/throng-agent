@@ -5,6 +5,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { credsCachePath, deleteCredentialConfig, writeCredentialConfig } from "./config.js";
 import type { BaseManifest } from "../manifest/types.js";
 
+// The wipe's post-condition guards the case where rmSync returns without having
+// removed anything — an immutable file, a busy mount point, a directory
+// repopulated by a throng-creds invocation still in flight. None of those can be
+// produced portably from a test, so rmSync is neutered for the one case that
+// asserts the post-condition and runs for real everywhere else. Same technique
+// the boot integration suite uses on node:os, and for the same reason: the thing
+// under test is a native call's effect, not a value this code computes.
+let swallowRmSync = false;
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (swallowRmSync) return;
+      actual.rmSync(...args);
+    },
+  };
+});
+
 function manifest(over: Partial<BaseManifest> = {}): BaseManifest {
   return {
     repos: [],
@@ -243,6 +262,24 @@ describe("deleteCredentialConfig", () => {
 
     expect(existsSync(config)).toBe(false);
     expect(existsSync(cache)).toBe(false);
+  });
+
+  // The caller turns "did not throw" into "safe to snapshot", so this is the one
+  // function whose silent partial success would put a live token into an image
+  // every task in the project boots from. The post-condition is checked rather
+  // than inferred from rmSync not having thrown.
+  it("throws when something it deleted is still on disk", () => {
+    const { config, cache } = populated();
+    swallowRmSync = true;
+    try {
+      expect(() => deleteCredentialConfig(config, cache)).toThrow(/credential wipe left/);
+      // Names what survived, since that is the whole diagnostic once the sandbox
+      // is gone: the config first, because it is the token that mints others.
+      expect(() => deleteCredentialConfig(config, cache)).toThrow(config);
+    } finally {
+      swallowRmSync = false;
+    }
+    expect(existsSync(config)).toBe(true);
   });
 
   // Called on the failure path too, and a second call must not turn a failed

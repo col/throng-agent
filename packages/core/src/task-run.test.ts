@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -261,6 +261,10 @@ describe("TaskRun.prepare", () => {
 
   // A snapshot that still has a live credential in it is worse than no snapshot,
   // so a wipe that cannot be proved to have happened fails the prepare.
+  //
+  // `credential-wipe`, not `credentials`: once the sandbox is gone, `step` is
+  // most of the diagnostic, and a failed WRITE is a harmless dead sandbox while a
+  // failed WIPE may be a sandbox still holding a live token.
   it("fails prepare when the wipe throws", async () => {
     const d = deps({
       deleteCredentialConfig: vi.fn(() => {
@@ -274,8 +278,24 @@ describe("TaskRun.prepare", () => {
 
     const status = tr.lifecycle.status();
     expect(status.state).toBe("failed");
-    expect(status.error?.step).toBe("credentials");
+    expect(status.error?.step).toBe("credential-wipe");
     expect(status.error?.message).toContain("refusing");
+  });
+
+  // The write and the wipe are told apart by `step` alone, so pin that they do
+  // not collide: this is the benign one.
+  it("fails prepare on the credentials step when the config cannot be written", async () => {
+    const d = deps({
+      writeCredentialConfig: vi.fn(() => {
+        throw new Error("EACCES: permission denied, mkdir '/home/user/.throng'");
+      }),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+
+    await tr.prepare(preparePayload);
+    await settle();
+
+    expect(tr.lifecycle.status().error?.step).toBe("credentials");
   });
 
   it("rejects a manifest carrying an agent block", async () => {
@@ -289,6 +309,9 @@ describe("TaskRun.prepare", () => {
 
   // The control plane's Oban retry maps 409 to :ok, so a second prepare must be
   // rejected rather than re-run over a workspace it is already preparing.
+  //
+  // No settle(), so this is the in-flight (`booting`) case specifically; the two
+  // rest states are covered below.
   it("rejects a second prepare", async () => {
     const tr = new TaskRun(deps(), { claude: adapter() });
     await tr.prepare(preparePayload);
@@ -297,6 +320,32 @@ describe("TaskRun.prepare", () => {
 
     expect(second.ok).toBe(false);
     if (!second.ok) expect("already" in second && second.already).toBe(true);
+  });
+
+  it("rejects a prepare once the workspace is already prepared", async () => {
+    const tr = new TaskRun(deps(), { claude: adapter() });
+    await tr.prepare(preparePayload);
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("prepared");
+
+    const second = await tr.prepare(preparePayload);
+
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect("already" in second && second.already).toBe(true);
+  });
+
+  // A live task must never be reset to a snapshot build: prepare wipes the
+  // credential config the running agent's git operations depend on.
+  it("rejects a prepare against a ready task", async () => {
+    const tr = new TaskRun(deps(), { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("ready");
+
+    const r = await tr.prepare(preparePayload);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect("already" in r && r.already).toBe(true);
   });
 });
 
@@ -336,23 +385,70 @@ describe("TaskRun.initialise from prepared", () => {
     expect(d.syncOrClone).toHaveBeenCalledTimes(2);
     expect(d.injectGitIdentity).toHaveBeenCalledOnce();
   });
+
+  // The guard is a double negation, and `failed` is the state a future reader is
+  // most likely to argue should be retryable. It is not: a failed prepare has
+  // already wiped the credential config, so an initialise on top of it would
+  // clone with no working helper, and the control plane throws the instance away
+  // rather than reusing it. Pinned so a "helpful" relaxation has to be deliberate.
+  it("still rejects initialise after a failed prepare", async () => {
+    const d = deps({
+      runSetupCommands: vi.fn(async () => ({
+        ok: false as const,
+        command: "x",
+        code: 1,
+        signal: null,
+        output: "",
+      })),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.prepare(preparePayload);
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("failed");
+
+    const r = await tr.initialise(okPayload);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect("already" in r && r.already).toBe(true);
+  });
 });
 
-// The security boundary, asserted against the real filesystem rather than a
-// mock. What survives this call is what E2B captures into an image that every
-// task in the project boots from.
+// Run against the real filesystem rather than a mock, because what it draws is
+// exactly what a mock cannot: that `prepare` reaches the real deleter, with a
+// real config file and a real token cache in place, and that both are gone by
+// the time it reports `prepared` — the state on which the control plane captures
+// the image every task in the project boots from.
+//
+// It proves that much and no more. Both deps are given EXPLICIT paths under a
+// temp directory, deliberately: `CONFIG_PATH` is a module constant resolved at
+// import time, so a test that pointed $HOME at a temp directory and then called
+// the zero-argument defaults would delete the developer's real ~/.throng. That
+// the defaults agree with throng-creds.sh's own `${THRONG_CREDS_CACHE:-…}` is a
+// separate claim, pinned in creds/config.test.ts.
 describe("TaskRun.prepare credential wipe (real filesystem)", () => {
+  let home = "";
+  // mkdtempSync leaves the directory behind otherwise, one per run.
+  afterEach(() => {
+    if (home !== "") rmSync(home, { recursive: true, force: true });
+    home = "";
+  });
+
   it("leaves no credential config and no token cache behind", async () => {
-    const home = mkdtempSync(join(tmpdir(), "throng-prepare-"));
+    home = mkdtempSync(join(tmpdir(), "throng-prepare-"));
     const configPath = join(home, ".throng", "config.json");
     const cachePath = join(home, ".throng", "cache");
+    // Sampled mid-run, because the wipe is the point: a test that only checked
+    // the end state would pass just as well if nothing had ever been written.
+    let presentDuringClone: { config: boolean; token: boolean } | undefined;
     const d = deps({
       writeCredentialConfig: (m) => writeCredentialConfig(m, configPath),
       deleteCredentialConfig: () => deleteCredentialConfig(configPath, cachePath),
       // Stand in for throng-creds minting a token during the clone.
       syncOrClone: async () => {
         mkdirSync(cachePath, { recursive: true });
-        writeFileSync(join(cachePath, "git_github.com_acme_web"), "9999999999\nk\nusername=x\npassword=ghs_live\n");
+        const token = join(cachePath, "git_github.com_acme_web");
+        writeFileSync(token, "9999999999\nk\nusername=x\npassword=ghs_live\n");
+        presentDuringClone = { config: existsSync(configPath), token: existsSync(token) };
         return { ok: true, output: "" };
       },
     });
@@ -361,9 +457,16 @@ describe("TaskRun.prepare credential wipe (real filesystem)", () => {
     await tr.prepare(preparePayload);
     await settle();
 
+    expect(presentDuringClone).toEqual({ config: true, token: true });
     expect(tr.lifecycle.status().state).toBe("prepared");
     expect(existsSync(configPath)).toBe(false);
     expect(existsSync(cachePath)).toBe(false);
+    // Narrow, and worth stating rather than reading as "nothing lingers": the
+    // only writer in this test is the test itself, so an empty `.throng` is no
+    // evidence about what throng-creds leaves elsewhere. What it does catch is
+    // the wipe leaving a THIRD thing beside the two paths asserted above — a
+    // renamed or backup copy of the config, say — which neither existsSync would
+    // see.
     expect(readdirSync(join(home, ".throng"))).toEqual([]);
   });
 });

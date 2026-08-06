@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homeDir } from "../env.js";
 import type { WorkspaceManifest } from "../manifest/types.js";
@@ -89,6 +89,13 @@ export function credsCachePath(): string {
  * unrelated OS reason (permissions, a busy mount) after the first delete
  * succeeds; there is no atomic way to remove both. Either throw fails the
  * `/api/prepare` call, so no snapshot is taken from a sandbox left half wiped.
+ *
+ * That ordering also bounds — without closing — the concurrent case: a
+ * throng-creds invocation spawned by a setup command can have read config.json
+ * before the wipe and write its minted token into the cache after it, leaving a
+ * live token behind. Config-first means no NEW helper can mint after the first
+ * delete, so the exposure is at most the round trips already in flight, and the
+ * post-condition below catches any that land before it runs.
  */
 export function deleteCredentialConfig(
   configPath = CONFIG_PATH,
@@ -97,6 +104,19 @@ export function deleteCredentialConfig(
   assertDeletableCacheDir(cachePath, configPath);
   rmSync(configPath, { force: true });
   rmSync(cachePath, { recursive: true, force: true });
+
+  // Checked, not assumed. The caller turns "did not throw" into "safe to
+  // snapshot", so this is the one function whose silent partial success would
+  // put a live token into an image every task in the project boots from.
+  // `rmSync` with `force` swallows ENOENT but not every way a path can survive a
+  // delete — an immutable file, a busy mount point, a directory repopulated by a
+  // throng-creds invocation still in flight — so the post-condition is verified
+  // rather than inferred from the absence of an exception.
+  if (existsSync(configPath) || existsSync(cachePath)) {
+    throw new Error(
+      `credential wipe left ${existsSync(configPath) ? configPath : cachePath} on disk`,
+    );
+  }
 }
 
 /**
