@@ -1,7 +1,7 @@
 import type { Server } from "node:http";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
-import { clone, checkout } from "../bootstrap/git.js";
+import { syncOrClone } from "../bootstrap/git.js";
 import { runSetupCommands } from "../bootstrap/setup.js";
 import { injectGitIdentity } from "../bootstrap/git-identity.js";
 import { writeCredentialConfig } from "../creds/config.js";
@@ -74,8 +74,7 @@ export function createControlApp(opts: ControlAppOptions): Express {
  */
 export function defaultBootDeps(): BootDeps {
   return {
-    clone,
-    checkout,
+    syncOrClone,
     runSetupCommands,
     writeCredentialConfig: (manifest) => writeCredentialConfig(manifest),
     injectGitIdentity,

@@ -6,8 +6,7 @@ import type { EngineAdapter, ServerHandle } from "../engine/adapter.js";
 
 const handle: ServerHandle = { shutdown: async () => {} };
 const bootDeps: BootDeps = {
-  clone: async () => ({ ok: true, output: "" }),
-  checkout: async () => ({ ok: true, output: "" }),
+  syncOrClone: async () => ({ ok: true, output: "" }),
   runSetupCommands: async () => ({ ok: true }),
   writeCredentialConfig: () => {},
   injectGitIdentity: () => {},

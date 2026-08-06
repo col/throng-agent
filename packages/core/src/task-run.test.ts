@@ -6,8 +6,7 @@ const handle: ServerHandle = { shutdown: vi.fn(async () => {}) };
 
 function deps(over: Partial<BootDeps> = {}): BootDeps {
   return {
-    clone: vi.fn(async () => ({ ok: true, output: "" })),
-    checkout: vi.fn(async () => ({ ok: true, output: "" })),
+    syncOrClone: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     writeCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
@@ -87,7 +86,7 @@ describe("TaskRun credential ordering", () => {
     const order: string[] = [];
     const d = deps({
       writeCredentialConfig: vi.fn(() => void order.push("config")),
-      clone: vi.fn(async () => {
+      syncOrClone: vi.fn(async () => {
         order.push("clone");
         return { ok: true, output: "" };
       }),
@@ -119,20 +118,18 @@ describe("TaskRun credential ordering", () => {
     expect(status.state).toBe("failed");
     expect(status.error?.step).toBe("credentials");
     expect(status.error?.message).toContain("EACCES");
-    expect(d.clone).not.toHaveBeenCalled();
+    expect(d.syncOrClone).not.toHaveBeenCalled();
   });
 
-  // Clone and checkout run WITH credentials in place under the pull model, and
-  // their output lands verbatim in the control plane's instance.error_message —
-  // the same sink the setup path already redacts.
-  it("redacts tokens out of a clone failure message", async () => {
-    const d = deps({
-      clone: vi.fn(async () => ({
-        ok: false,
-        code: 128,
-        output: "fatal: could not read Username for 'https://ghs_0123456789abcdefghij@github.com'",
-      })),
-    });
+  // Sync runs WITH credentials in place under the pull model, and its output
+  // lands verbatim in the control plane's instance.error_message — the same sink
+  // the setup path already redacts. `op` names which git command failed, which is
+  // the only thing lost by collapsing clone and checkout into one dep.
+  it.each([
+    ["clone", "fatal: could not read Username for 'https://ghs_0123456789abcdefghij@github.com'"],
+    ["checkout", "error: pathspec not found; remote was https://x-access-token:ghp_0123456789abcdefghij@github.com"],
+  ])("redacts tokens out of a %s failure message", async (op, output) => {
+    const d = deps({ syncOrClone: vi.fn(async () => ({ ok: false, code: 128, op, output })) });
 
     const tr = new TaskRun(d, { claude: adapter() });
     await tr.initialise(okPayload);
@@ -140,36 +137,18 @@ describe("TaskRun credential ordering", () => {
 
     const status = tr.lifecycle.status();
     expect(status.error?.step).toBe("cloning");
+    expect(status.error?.message).toContain(`git ${op} failed`);
     expect(status.error?.message).toContain("[REDACTED]");
-    expect(status.error?.message).not.toContain("ghs_0123456789abcdefghij");
+    expect(status.error?.message).not.toMatch(/gh[ps]_0123456789abcdefghij/);
   });
 
-  it("redacts tokens out of a checkout failure message", async () => {
-    const d = deps({
-      checkout: vi.fn(async () => ({
-        ok: false,
-        code: 1,
-        output: "error: pathspec not found; remote was https://x-access-token:ghp_0123456789abcdefghij@github.com",
-      })),
-    });
-
-    const tr = new TaskRun(d, { claude: adapter() });
-    await tr.initialise(okPayload);
-    await settle();
-
-    const status = tr.lifecycle.status();
-    expect(status.error?.step).toBe("cloning");
-    expect(status.error?.message).toContain("[REDACTED]");
-    expect(status.error?.message).not.toContain("ghp_0123456789abcdefghij");
-  });
-
-  it("clones without a token argument", async () => {
+  it("syncs each repo with its url, destination and ref", async () => {
     const d = deps();
     const tr = new TaskRun(d, { claude: adapter() });
     await tr.initialise(okPayload);
     await settle();
 
-    expect(d.clone).toHaveBeenCalledWith("https://x/y", "/home/user/workspace/y");
+    expect(d.syncOrClone).toHaveBeenCalledWith("https://x/y", "/home/user/workspace/y", "main");
   });
 });
 

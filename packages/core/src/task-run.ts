@@ -4,15 +4,16 @@ import { describeSetupFailure, redactTokens, type SetupResult } from "./bootstra
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
-import type { BaseManifest, FieldError, Manifest, UserIdentity } from "./manifest/types.js";
+import type { FieldError, Manifest, UserIdentity, WorkspaceManifest } from "./manifest/types.js";
 import { validate } from "./manifest/validate.js";
 
 /** Engine-agnostic boot dependencies. */
 export interface BootDeps {
-  clone: (url: string, dest: string) => Promise<GitResult>;
-  checkout: (dest: string, ref: string) => Promise<GitResult>;
+  /** Clone-or-resync, because a sandbox restored from a project snapshot already
+   *  has every `dest` on disk and `git clone` fails outright when it does. */
+  syncOrClone: (url: string, dest: string, ref: string) => Promise<GitResult>;
   runSetupCommands: (cwd: string, commands: string[]) => Promise<SetupResult>;
-  writeCredentialConfig: (manifest: BaseManifest) => void;
+  writeCredentialConfig: (manifest: WorkspaceManifest) => void;
   injectGitIdentity: (identity: UserIdentity) => void;
   workspaceRoot: string;
 }
@@ -57,57 +58,9 @@ export class TaskRun {
 
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
-      // First, and before anything touches the network: cloning authenticates
-      // through throng-creds, which reads this file on every cache miss. There
-      // is no per-invocation credential environment any more.
-      log.info("boot step: writing credential config", {
-        mode: manifest.github_token ? "static" : manifest.credentials ? "api" : "none",
-      });
-      try {
-        this.deps.writeCredentialConfig(manifest);
-      } catch (err) {
-        throw new StepError("credentials", err instanceof Error ? err.message : String(err));
-      }
-
-      this.lifecycle.set("cloning");
-      log.info("boot step: cloning repos", { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
-      let primaryDest = "";
-      for (const repo of manifest.repos) {
-        const dest = join(this.deps.workspaceRoot, repo.dest);
-        // `repos[].url` is whatever the caller sent, and the credential-in-URL
-        // form (https://x-access-token:ghs_…@github.com/…) is still legal input
-        // even though nothing in this runtime produces it any more. stdout leaves
-        // the box, so it gets the same redaction as the failure messages below.
-        log.info("cloning repo", { url: redactTokens(repo.url), ref: repo.ref, dest, primary: repo.primary });
-        // Clone and checkout run WITH credentials in place, and this message
-        // becomes the control plane's `instance.error_message` — the same sink
-        // describeSetupFailure redacts. git does not normally echo a
-        // helper-supplied password, but the sink is kept uniformly clean rather
-        // than relying on reasoning about what git might print.
-        const cloned = await this.deps.clone(repo.url, dest);
-        if (!cloned.ok) {
-          throw new StepError("cloning", `git clone failed for ${repo.dest} (exit ${cloned.code}): ${redactTokens(cloned.output).trim()}`);
-        }
-        const checked = await this.deps.checkout(dest, repo.ref);
-        if (!checked.ok) {
-          throw new StepError("cloning", `git checkout ${repo.ref} failed for ${repo.dest}: ${redactTokens(checked.output).trim()}`);
-        }
-        log.info("repo ready", { dest, ref: repo.ref });
-        if (repo.primary) primaryDest = dest;
-      }
-
-      this.lifecycle.set("setup");
-      // Setup commands now run WITH working git and gh, because the config
-      // above is already in place. See describeSetupFailure: their output is
-      // redacted before it leaves this process.
-      log.info("boot step: running setup commands", { count: manifest.setup_commands.length, cwd: primaryDest });
-      const setup = await this.deps.runSetupCommands(primaryDest, manifest.setup_commands);
-      if (!setup.ok) {
-        // `describeSetupFailure` carries the failing command, a decoded signal exit
-        // (137 = OOM-killed, the common one) and the tail of its output — without
-        // it the orchestrator only ever saw "(exit 137)" with no clue why.
-        throw new StepError("setup", describeSetupFailure(setup));
-      }
+      this.writeCredentials(manifest);
+      const primaryDest = await this.syncRepos(manifest);
+      await this.runSetup(manifest, primaryDest);
 
       log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
@@ -126,15 +79,80 @@ export class TaskRun {
       this.lifecycle.set("ready");
       log.info("boot complete; agent is ready");
     } catch (err) {
-      const detail =
-        err instanceof StepError
-          ? { step: err.step, message: err.message }
-          : { step: "boot", message: err instanceof Error ? err.message : String(err) };
-      this.lifecycle.fail(detail);
-      log.error("boot failed", { step: detail.step, message: detail.message });
-      if (!(err instanceof StepError) && err instanceof Error && err.stack) {
-        log.error("boot failure stack", { stack: err.stack });
+      this.failFrom(err);
+    }
+  }
+
+  /**
+   * First, and before anything touches the network: cloning authenticates through
+   * throng-creds, which reads this file on every cache miss. There is no
+   * per-invocation credential environment any more.
+   */
+  private writeCredentials(manifest: WorkspaceManifest): void {
+    log.info("boot step: writing credential config", {
+      mode: manifest.github_token ? "static" : manifest.credentials ? "api" : "none",
+    });
+    try {
+      this.deps.writeCredentialConfig(manifest);
+    } catch (err) {
+      throw new StepError("credentials", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Returns the primary repo's destination — where setup commands run. */
+  private async syncRepos(manifest: WorkspaceManifest): Promise<string> {
+    this.lifecycle.set("cloning");
+    log.info("boot step: cloning repos", { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
+    let primaryDest = "";
+    for (const repo of manifest.repos) {
+      const dest = join(this.deps.workspaceRoot, repo.dest);
+      // `repos[].url` is whatever the caller sent, and the credential-in-URL
+      // form (https://x-access-token:ghs_…@github.com/…) is still legal input
+      // even though nothing in this runtime produces it any more. stdout leaves
+      // the box, so it gets the same redaction as the failure messages below.
+      log.info("cloning repo", { url: redactTokens(repo.url), ref: repo.ref, dest, primary: repo.primary });
+      // The sync runs WITH credentials in place, and this message becomes the
+      // control plane's `instance.error_message` — the same sink
+      // describeSetupFailure redacts. git does not normally echo a
+      // helper-supplied password, but the sink is kept uniformly clean rather
+      // than relying on reasoning about what git might print.
+      const synced = await this.deps.syncOrClone(repo.url, dest, repo.ref);
+      if (!synced.ok) {
+        throw new StepError(
+          "cloning",
+          `git ${synced.op ?? "sync"} failed for ${repo.dest} (exit ${synced.code}): ${redactTokens(synced.output).trim()}`,
+        );
       }
+      log.info("repo ready", { dest, ref: repo.ref });
+      if (repo.primary) primaryDest = dest;
+    }
+    return primaryDest;
+  }
+
+  private async runSetup(manifest: WorkspaceManifest, primaryDest: string): Promise<void> {
+    this.lifecycle.set("setup");
+    // Setup commands run WITH working git and gh, because the credential config
+    // is already in place. See describeSetupFailure: their output is redacted
+    // before it leaves this process.
+    log.info("boot step: running setup commands", { count: manifest.setup_commands.length, cwd: primaryDest });
+    const setup = await this.deps.runSetupCommands(primaryDest, manifest.setup_commands);
+    if (!setup.ok) {
+      // `describeSetupFailure` carries the failing command, a decoded signal exit
+      // (137 = OOM-killed, the common one) and the tail of its output — without
+      // it the orchestrator only ever saw "(exit 137)" with no clue why.
+      throw new StepError("setup", describeSetupFailure(setup));
+    }
+  }
+
+  private failFrom(err: unknown): void {
+    const detail =
+      err instanceof StepError
+        ? { step: err.step, message: err.message }
+        : { step: "boot", message: err instanceof Error ? err.message : String(err) };
+    this.lifecycle.fail(detail);
+    log.error("boot failed", { step: detail.step, message: detail.message });
+    if (!(err instanceof StepError) && err instanceof Error && err.stack) {
+      log.error("boot failure stack", { stack: err.stack });
     }
   }
 

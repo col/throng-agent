@@ -22,8 +22,7 @@ vi.mock("node:os", async (importOriginal) => {
 // the claude adapter is selected by agent.platform and the lifecycle reaches ready.
 function fakeDeps(): BootDeps {
   return {
-    clone: vi.fn(async () => ({ ok: true, output: "" })),
-    checkout: vi.fn(async () => ({ ok: true, output: "" })),
+    syncOrClone: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     writeCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),

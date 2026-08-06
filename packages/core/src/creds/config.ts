@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homeDir } from "../env.js";
-import type { BaseManifest } from "../manifest/types.js";
+import type { WorkspaceManifest } from "../manifest/types.js";
 
 /**
  * Where throng-creds reads its configuration. The env var exists for tests.
@@ -42,7 +42,7 @@ export const CONFIG_PATH = process.env.THRONG_CONFIG || join(homeDir(), ".throng
  *
  * Called before cloning, because cloning now authenticates through the helper.
  */
-export function writeCredentialConfig(manifest: BaseManifest, path = CONFIG_PATH): void {
+export function writeCredentialConfig(manifest: WorkspaceManifest, path = CONFIG_PATH): void {
   const config: Record<string, unknown> = {};
   if (manifest.credentials) config.credentials = manifest.credentials;
   if (manifest.github_token) config.github_token = manifest.github_token;
