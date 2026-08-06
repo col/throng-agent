@@ -9,6 +9,7 @@ const bootDeps: BootDeps = {
   syncOrClone: async () => ({ ok: true, output: "" }),
   runSetupCommands: async () => ({ ok: true }),
   writeCredentialConfig: () => {},
+  deleteCredentialConfig: () => {},
   injectGitIdentity: () => {},
   workspaceRoot: "/home/user/workspace",
 };

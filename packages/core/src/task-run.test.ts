@@ -1,4 +1,8 @@
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { deleteCredentialConfig, writeCredentialConfig } from "./creds/config.js";
 import { TaskRun, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
 
@@ -9,6 +13,7 @@ function deps(over: Partial<BootDeps> = {}): BootDeps {
     syncOrClone: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     writeCredentialConfig: vi.fn(() => {}),
+    deleteCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
     workspaceRoot: "/home/user/workspace",
     ...over,
@@ -180,5 +185,185 @@ describe("TaskRun logging", () => {
     expect(cloning[0]).toContain("[REDACTED]");
     // Still useful to an operator: the host and repo survive redaction.
     expect(cloning[0]).toContain("github.com/acme/app.git");
+  });
+});
+
+const preparePayload = {
+  repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: true }],
+  setup_commands: ["mise install"],
+  credentials: { url: "https://cp.example/api/credentials", token: "identity-token" },
+};
+
+describe("TaskRun.prepare", () => {
+  it("reaches prepared without starting an agent", async () => {
+    const claude = adapter();
+    const d = deps();
+    const tr = new TaskRun(d, { claude });
+
+    const r = await tr.prepare(preparePayload);
+    expect(r).toEqual({ ok: true, status: "booting" });
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("prepared");
+    expect(d.syncOrClone).toHaveBeenCalledWith("https://x/y", "/home/user/workspace/y", "main");
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
+    // Nothing task-specific and no LLM credential may reach a snapshot, and the
+    // A2A server must not be serving in an image every task boots from.
+    expect(claude.createA2AServer).not.toHaveBeenCalled();
+    expect(claude.injectCredentials).not.toHaveBeenCalled();
+    expect(d.injectGitIdentity).not.toHaveBeenCalled();
+  });
+
+  // The wipe is the last thing before `prepared`, because the control plane
+  // snapshots the moment it sees that state.
+  it("deletes the credential config after setup and before reporting prepared", async () => {
+    const order: string[] = [];
+    const d = deps({
+      writeCredentialConfig: vi.fn(() => void order.push("config")),
+      syncOrClone: vi.fn(async () => {
+        order.push("clone");
+        return { ok: true, output: "" };
+      }),
+      runSetupCommands: vi.fn(async () => {
+        order.push("setup");
+        return { ok: true };
+      }),
+      deleteCredentialConfig: vi.fn(() => void order.push("wipe")),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+
+    await tr.prepare(preparePayload);
+    await settle();
+
+    expect(order).toEqual(["config", "clone", "setup", "wipe"]);
+    expect(tr.lifecycle.status().state).toBe("prepared");
+  });
+
+  it("wipes credentials even when setup fails, and reports the failure", async () => {
+    const d = deps({
+      runSetupCommands: vi.fn(async () => ({
+        ok: false as const,
+        command: "mise install",
+        code: 1,
+        signal: null,
+        output: "boom",
+      })),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+
+    await tr.prepare(preparePayload);
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("failed");
+    expect(tr.lifecycle.status().error?.step).toBe("setup");
+    expect(d.deleteCredentialConfig).toHaveBeenCalled();
+  });
+
+  // A snapshot that still has a live credential in it is worse than no snapshot,
+  // so a wipe that cannot be proved to have happened fails the prepare.
+  it("fails prepare when the wipe throws", async () => {
+    const d = deps({
+      deleteCredentialConfig: vi.fn(() => {
+        throw new Error("refusing '/' as the credential cache directory: it is too close to the filesystem root.");
+      }),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+
+    await tr.prepare(preparePayload);
+    await settle();
+
+    const status = tr.lifecycle.status();
+    expect(status.state).toBe("failed");
+    expect(status.error?.step).toBe("credentials");
+    expect(status.error?.message).toContain("refusing");
+  });
+
+  it("rejects a manifest carrying an agent block", async () => {
+    const tr = new TaskRun(deps(), { claude: adapter() });
+
+    const r = await tr.prepare({ ...preparePayload, agent: { platform: "claude" } });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok && "errors" in r) expect(r.errors.some((e) => e.field === "agent")).toBe(true);
+  });
+
+  // The control plane's Oban retry maps 409 to :ok, so a second prepare must be
+  // rejected rather than re-run over a workspace it is already preparing.
+  it("rejects a second prepare", async () => {
+    const tr = new TaskRun(deps(), { claude: adapter() });
+    await tr.prepare(preparePayload);
+
+    const second = await tr.prepare(preparePayload);
+
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect("already" in second && second.already).toBe(true);
+  });
+});
+
+describe("TaskRun.initialise from prepared", () => {
+  async function prepared(d: BootDeps, registry: { claude: EngineAdapter<any, any> }): Promise<TaskRun> {
+    const tr = new TaskRun(d, registry);
+    await tr.prepare(preparePayload);
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("prepared");
+    return tr;
+  }
+
+  // A snapshot preserves memory, so it preserves lifecycle state: a restored
+  // sandbox starts at `prepared` and must still accept its one real initialise.
+  it("accepts exactly one initialise, then 409s", async () => {
+    const claude = adapter();
+    const tr = await prepared(deps(), { claude });
+
+    const first = await tr.initialise(okPayload);
+    await settle();
+    const second = await tr.initialise(okPayload);
+
+    expect(first).toEqual({ ok: true, status: "booting" });
+    expect(tr.lifecycle.status().state).toBe("ready");
+    expect(claude.createA2AServer).toHaveBeenCalledOnce();
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect("already" in second && second.already).toBe(true);
+  });
+
+  it("re-syncs repos and re-runs setup on the restored workspace", async () => {
+    const d = deps();
+    const tr = await prepared(d, { claude: adapter() });
+
+    await tr.initialise(okPayload);
+    await settle();
+
+    expect(d.syncOrClone).toHaveBeenCalledTimes(2);
+    expect(d.injectGitIdentity).toHaveBeenCalledOnce();
+  });
+});
+
+// The security boundary, asserted against the real filesystem rather than a
+// mock. What survives this call is what E2B captures into an image that every
+// task in the project boots from.
+describe("TaskRun.prepare credential wipe (real filesystem)", () => {
+  it("leaves no credential config and no token cache behind", async () => {
+    const home = mkdtempSync(join(tmpdir(), "throng-prepare-"));
+    const configPath = join(home, ".throng", "config.json");
+    const cachePath = join(home, ".throng", "cache");
+    const d = deps({
+      writeCredentialConfig: (m) => writeCredentialConfig(m, configPath),
+      deleteCredentialConfig: () => deleteCredentialConfig(configPath, cachePath),
+      // Stand in for throng-creds minting a token during the clone.
+      syncOrClone: async () => {
+        mkdirSync(cachePath, { recursive: true });
+        writeFileSync(join(cachePath, "git_github.com_acme_web"), "9999999999\nk\nusername=x\npassword=ghs_live\n");
+        return { ok: true, output: "" };
+      },
+    });
+
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.prepare(preparePayload);
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("prepared");
+    expect(existsSync(configPath)).toBe(false);
+    expect(existsSync(cachePath)).toBe(false);
+    expect(readdirSync(join(home, ".throng"))).toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adap
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
 import type { FieldError, Manifest, UserIdentity, WorkspaceManifest } from "./manifest/types.js";
-import { validate } from "./manifest/validate.js";
+import { validate, validatePrepare } from "./manifest/validate.js";
 
 /** Engine-agnostic boot dependencies. */
 export interface BootDeps {
@@ -14,14 +14,21 @@ export interface BootDeps {
   syncOrClone: (url: string, dest: string, ref: string) => Promise<GitResult>;
   runSetupCommands: (cwd: string, commands: string[]) => Promise<SetupResult>;
   writeCredentialConfig: (manifest: WorkspaceManifest) => void;
+  /** Removes the credential config and every token minted from it, before a
+   *  prepared workspace is snapshotted. */
+  deleteCredentialConfig: () => void;
   injectGitIdentity: (identity: UserIdentity) => void;
   workspaceRoot: string;
 }
 
-export type InitialiseResult =
+/** What a control-server route does with an accepted, rejected or duplicate POST. */
+export type BootAcceptance =
   | { ok: true; status: "booting" }
   | { ok: false; already: true }
   | { ok: false; errors: FieldError[] };
+
+export type InitialiseResult = BootAcceptance;
+export type PrepareResult = BootAcceptance;
 
 export class TaskRun {
   readonly lifecycle = new Lifecycle();
@@ -33,7 +40,11 @@ export class TaskRun {
   ) {}
 
   async initialise(payload: unknown): Promise<InitialiseResult> {
-    if (this.lifecycle.state !== "uninitialised") {
+    // `prepared` is a rest state, not an initialised one: a sandbox restored from
+    // a project snapshot resumes with the lifecycle the snapshot captured, and
+    // that snapshot was deliberately taken before any agent existed. Everything
+    // else that has left `uninitialised` is a second call against a live task.
+    if (this.lifecycle.state !== "uninitialised" && this.lifecycle.state !== "prepared") {
       log.warn("initialise rejected: already initialised", { state: this.lifecycle.state });
       return { ok: false, already: true };
     }
@@ -54,6 +65,73 @@ export class TaskRun {
     });
     void this.boot(result.manifest, result.adapter);
     return { ok: true, status: "booting" };
+  }
+
+  /**
+   * Warm the workspace without initialising an agent: sync every repo, run the
+   * project's setup commands, then delete the credential config and settle at
+   * `prepared`, where the control plane snapshots the sandbox.
+   *
+   * Runs the same three steps `boot()` runs, through the same private methods, so
+   * a snapshot build and the task boot that restores from it cannot drift.
+   */
+  async prepare(payload: unknown): Promise<PrepareResult> {
+    if (this.lifecycle.state !== "uninitialised") {
+      log.warn("prepare rejected: lifecycle has already left uninitialised", { state: this.lifecycle.state });
+      return { ok: false, already: true };
+    }
+
+    const result = validatePrepare(payload);
+    if (!result.ok) {
+      log.warn("prepare rejected: manifest validation failed", {
+        errors: result.errors.map((e) => e.field),
+      });
+      return { ok: false, errors: result.errors };
+    }
+
+    this.lifecycle.set("booting");
+    log.info("prepare accepted; warming the workspace asynchronously", {
+      repos: result.manifest.repos.length,
+      setupCommands: result.manifest.setup_commands.length,
+    });
+    void this.prepareWorkspace(result.manifest);
+    return { ok: true, status: "booting" };
+  }
+
+  private async prepareWorkspace(manifest: WorkspaceManifest): Promise<void> {
+    try {
+      this.writeCredentials(manifest);
+      const primaryDest = await this.syncRepos(manifest);
+      await this.runSetup(manifest, primaryDest);
+
+      // A security boundary, not tidiness. Everything still on disk here is
+      // captured into an E2B-stored image that every task in the project boots
+      // from, so a surviving token would be shared with all of them. A wipe that
+      // throws fails the prepare: a snapshot with a live credential in it is
+      // worse than no snapshot.
+      log.info("prepare step: deleting the credential config and token cache");
+      try {
+        this.deps.deleteCredentialConfig();
+      } catch (err) {
+        throw new StepError("credentials", err instanceof Error ? err.message : String(err));
+      }
+
+      this.lifecycle.set("prepared");
+      log.info("prepare complete; workspace is ready to snapshot");
+    } catch (err) {
+      // Best effort on the failure path too: the control plane kills a failed
+      // snapshot instance, but a token must not outlive the run that fetched it
+      // merely because a setup command exited non-zero. The original failure is
+      // what gets reported, so a second wipe error is swallowed deliberately.
+      try {
+        this.deps.deleteCredentialConfig();
+      } catch (wipeErr) {
+        log.error("credential wipe failed after a failed prepare", {
+          message: wipeErr instanceof Error ? wipeErr.message : String(wipeErr),
+        });
+      }
+      this.reportFailure(err);
+    }
   }
 
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {

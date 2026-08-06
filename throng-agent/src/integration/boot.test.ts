@@ -25,6 +25,7 @@ function fakeDeps(): BootDeps {
     syncOrClone: vi.fn(async () => ({ ok: true, output: "" })),
     runSetupCommands: vi.fn(async () => ({ ok: true })),
     writeCredentialConfig: vi.fn(() => {}),
+    deleteCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
     workspaceRoot: "/home/user/workspace",
   };

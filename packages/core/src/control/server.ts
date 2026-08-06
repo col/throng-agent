@@ -4,7 +4,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { syncOrClone } from "../bootstrap/git.js";
 import { runSetupCommands } from "../bootstrap/setup.js";
 import { injectGitIdentity } from "../bootstrap/git-identity.js";
-import { writeCredentialConfig } from "../creds/config.js";
+import { deleteCredentialConfig, writeCredentialConfig } from "../creds/config.js";
 import { homeDir } from "../env.js";
 import type { AdapterRegistry } from "../engine/adapter.js";
 import { log } from "../log.js";
@@ -77,6 +77,7 @@ export function defaultBootDeps(): BootDeps {
     syncOrClone,
     runSetupCommands,
     writeCredentialConfig: (manifest) => writeCredentialConfig(manifest),
+    deleteCredentialConfig: () => deleteCredentialConfig(),
     injectGitIdentity,
     // `||` rather than `??` so a blank WORKSPACE_DIR falls back instead of
     // resolving every clone destination against "".
