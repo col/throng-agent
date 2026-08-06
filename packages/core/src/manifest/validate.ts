@@ -1,7 +1,16 @@
 import type { Env } from "../env.js";
 import type { AdapterRegistry, EngineAdapter } from "../engine/adapter.js";
 import { log } from "../log.js";
-import type { BaseManifest, CredentialsConfig, FieldError, Manifest, RepoSpec, ValidateResult } from "./types.js";
+import type {
+  BaseManifest,
+  CredentialsConfig,
+  FieldError,
+  Manifest,
+  PrepareValidateResult,
+  RepoSpec,
+  ValidateResult,
+  WorkspaceManifest,
+} from "./types.js";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -22,7 +31,7 @@ export function validate(
   }
   const errors: FieldError[] = [];
 
-  validateRepos(input.repos, errors);
+  validateWorkspace(input, errors);
 
   // Routing: core reads exactly one reserved sub-field, agent.platform, to pick
   // the adapter. Everything else in `agent` is the selected adapter's payload.
@@ -48,39 +57,13 @@ export function validate(
   const agentResult = adapter ? adapter.validateAgent(input, env) : undefined;
   if (agentResult && !agentResult.ok) errors.push(...agentResult.errors);
 
-  if ("github_token" in input && typeof input.github_token !== "string") {
-    errors.push({ field: "github_token", reason: "must be a string" });
-  }
-
-  validateCredentials(input.credentials, errors);
-
   validateUserIdentity(input.user_identity, errors);
-
-  if ("setup_commands" in input) {
-    const list = input.setup_commands;
-    if (!Array.isArray(list)) {
-      errors.push({ field: "setup_commands", reason: "must be a list of strings" });
-    } else if (!list.every((c) => typeof c === "string" && c.trim() !== "")) {
-      errors.push({ field: "setup_commands", reason: "each entry must be a non-empty string" });
-    }
-  }
 
   if (errors.length > 0) return { ok: false, errors };
 
   // Cross-field rules run only after all per-field checks pass.
   const repos = input.repos as Array<Record<string, unknown>>;
-  const cross: FieldError[] = [];
-  const primaries = repos.filter((r) => r.primary === true).length;
-  if (primaries !== 1) {
-    cross.push({
-      field: "repos[].primary",
-      reason: `exactly one repo must be marked primary: true (got ${primaries})`,
-    });
-  }
-  const dests = repos.map((r) => r.dest);
-  if (new Set(dests).size !== dests.length) {
-    cross.push({ field: "repos[].dest", reason: "dest values must be unique across repos" });
-  }
+  const cross = crossFieldRepoErrors(repos);
   if (cross.length > 0) return { ok: false, errors: cross };
 
   // adapter + agentResult are defined and ok here (errors would have returned
@@ -90,6 +73,90 @@ export function validate(
   }
   const platform = (input.agent as Record<string, unknown>).platform as string;
   return { ok: true, manifest: buildManifest(input, repos, platform, agentResult.agent, env), adapter };
+}
+
+/**
+ * The `/api/prepare` manifest: a workspace and nothing else.
+ *
+ * Shares every per-field and cross-field rule with `validate` above, so the
+ * snapshot build and the task boot that restores from it cannot disagree about
+ * what a repo list means.
+ */
+export function validatePrepare(input: unknown, env: Env = process.env): PrepareValidateResult {
+  if (!isObject(input)) {
+    return { ok: false, errors: [{ field: "manifest", reason: "must be a JSON object" }] };
+  }
+  const errors: FieldError[] = [];
+
+  validateWorkspace(input, errors);
+
+  // Rejected, not ignored. A snapshot is shared by every task in the project and
+  // is stored by E2B, so nothing task-specific and no LLM credential may be baked
+  // into one. The control plane guarantees that by construction —
+  // prepare_payload/2 never references these fields — so a manifest that carries
+  // one is an initialise manifest sent to the wrong route, and a 400 says that
+  // where silently ignoring it would build a snapshot the caller misunderstands.
+  //
+  // Presence, not truthiness: an explicit null is the same mistake.
+  if ("agent" in input) {
+    errors.push({
+      field: "agent",
+      reason:
+        "must not be sent to /api/prepare: a snapshot is shared by every task in the project and carries no agent configuration or credential",
+    });
+  }
+  if ("user_identity" in input) {
+    errors.push({
+      field: "user_identity",
+      reason:
+        "must not be sent to /api/prepare: the commit identity is injected per task by /api/initialise",
+    });
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+
+  const repos = input.repos as Array<Record<string, unknown>>;
+  const cross = crossFieldRepoErrors(repos);
+  if (cross.length > 0) return { ok: false, errors: cross };
+
+  return { ok: true, manifest: buildWorkspaceManifest(input, repos, env) };
+}
+
+/** Every per-field rule both routes share. */
+function validateWorkspace(input: Record<string, unknown>, errors: FieldError[]): void {
+  validateRepos(input.repos, errors);
+
+  if ("github_token" in input && typeof input.github_token !== "string") {
+    errors.push({ field: "github_token", reason: "must be a string" });
+  }
+
+  validateCredentials(input.credentials, errors);
+
+  if ("setup_commands" in input) {
+    const list = input.setup_commands;
+    if (!Array.isArray(list)) {
+      errors.push({ field: "setup_commands", reason: "must be a list of strings" });
+    } else if (!list.every((c) => typeof c === "string" && c.trim() !== "")) {
+      errors.push({ field: "setup_commands", reason: "each entry must be a non-empty string" });
+    }
+  }
+}
+
+/** Rules that need every repo at once; run only after the per-field ones pass. */
+function crossFieldRepoErrors(repos: Array<Record<string, unknown>>): FieldError[] {
+  const errors: FieldError[] = [];
+  const primaries = repos.filter((r) => r.primary === true).length;
+  if (primaries !== 1) {
+    errors.push({
+      field: "repos[].primary",
+      reason: `exactly one repo must be marked primary: true (got ${primaries})`,
+    });
+  }
+  const dests = repos.map((r) => r.dest);
+  if (new Set(dests).size !== dests.length) {
+    errors.push({ field: "repos[].dest", reason: "dest values must be unique across repos" });
+  }
+  return errors;
 }
 
 function validateRepos(value: unknown, errors: FieldError[]): void {
@@ -188,6 +255,29 @@ function validateCredentials(value: unknown, errors: FieldError[]): void {
   if (tokenReason) errors.push({ field: "credentials.token", reason: tokenReason });
 }
 
+function buildWorkspaceManifest(
+  input: Record<string, unknown>,
+  repos: Array<Record<string, unknown>>,
+  env: Env,
+): WorkspaceManifest {
+  const specs: RepoSpec[] = repos.map((r) => ({
+    url: r.url as string,
+    ref: r.ref as string,
+    dest: r.dest as string,
+    primary: r.primary as boolean,
+  }));
+  const creds = isObject(input.credentials) ? input.credentials : null;
+  const credentials: CredentialsConfig | null = creds
+    ? { url: creds.url as string, token: creds.token as string }
+    : null;
+  return {
+    repos: specs,
+    credentials,
+    github_token: blankToNil(input.github_token) ?? blankToNil(env.GITHUB_TOKEN),
+    setup_commands: (input.setup_commands as string[] | undefined) ?? [],
+  };
+}
+
 function buildManifest(
   input: Record<string, unknown>,
   repos: Array<Record<string, unknown>>,
@@ -195,25 +285,12 @@ function buildManifest(
   agent: unknown,
   env: Env,
 ): Manifest {
-  const specs: RepoSpec[] = repos.map((r) => ({
-    url: r.url as string,
-    ref: r.ref as string,
-    dest: r.dest as string,
-    primary: r.primary as boolean,
-  }));
   // A blank name/email is treated as absent, the same way a blank token is: git
   // rejects an empty ident, so passing one through would only fail later.
   const identity = isObject(input.user_identity) ? input.user_identity : {};
-  const creds = isObject(input.credentials) ? input.credentials : null;
-  const credentials: CredentialsConfig | null = creds
-    ? { url: creds.url as string, token: creds.token as string }
-    : null;
   const base: BaseManifest = {
-    repos: specs,
-    credentials,
-    github_token: blankToNil(input.github_token) ?? blankToNil(env.GITHUB_TOKEN),
+    ...buildWorkspaceManifest(input, repos, env),
     user_identity: { name: blankToNil(identity.name), email: blankToNil(identity.email) },
-    setup_commands: (input.setup_commands as string[] | undefined) ?? [],
   };
   return { ...base, platform, agent };
 }

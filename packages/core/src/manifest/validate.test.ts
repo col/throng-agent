@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { validate } from "./validate.js";
+import { validate, validatePrepare } from "./validate.js";
 import type { AgentResult, EngineAdapter } from "../engine/adapter.js";
 
 // Echo adapter: assumes core already checked agent-is-object + platform;
@@ -224,5 +224,99 @@ describe("credentials block", () => {
     const fallback = validate(base, registry, { GITHUB_TOKEN: "ghp_b" });
     expect(fallback.ok).toBe(true);
     if (fallback.ok) expect(fallback.manifest.github_token).toBe("ghp_b");
+  });
+});
+
+// The exact body Throng.Agents.Manifest.Resolve.prepare_payload/2 produces.
+// Keys whose value is nil are dropped by the control plane, so github_token is
+// absent here rather than null.
+const preparePayload = {
+  repos: [{ url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true }],
+  setup_commands: ["mise install", "mix deps.get"],
+  credentials: { url: "https://cp.example/api/credentials", token: "identity-token" },
+};
+
+describe("validatePrepare", () => {
+  const errorsOf = (input: unknown) => {
+    const r = validatePrepare(input);
+    if (r.ok) throw new Error("expected validation to fail");
+    return r.errors;
+  };
+
+  // An explicit empty env, like the initialise token cases: github_token falls
+  // back to GITHUB_TOKEN, so a developer with one set would otherwise fail this.
+  it("accepts the control plane's prepare payload", () => {
+    const r = validatePrepare(preparePayload, {});
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.manifest.repos).toEqual([
+        { url: "https://github.com/acme/web.git", ref: "main", dest: "web", primary: true },
+      ]);
+      expect(r.manifest.setup_commands).toEqual(["mise install", "mix deps.get"]);
+      expect(r.manifest.credentials).toEqual({
+        url: "https://cp.example/api/credentials",
+        token: "identity-token",
+      });
+      expect(r.manifest.github_token).toBeNull();
+      // The type has no user_identity, and the built manifest must not grow one:
+      // git identity is a per-task /api/initialise concern and a `git config
+      // --global` write does not belong in an image shared by every task.
+      expect("user_identity" in r.manifest).toBe(false);
+    }
+  });
+
+  it("accepts the standalone form with a static github_token", () => {
+    const { credentials, ...rest } = preparePayload;
+    const r = validatePrepare({ ...rest, github_token: "ghp_static" }, {});
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.manifest.github_token).toBe("ghp_static");
+      expect(r.manifest.credentials).toBeNull();
+    }
+  });
+
+  // Rejected rather than ignored. A snapshot is shared by every task in the
+  // project and is stored by E2B, so no agent configuration and no LLM credential
+  // may be baked into one. The control plane guarantees that by construction —
+  // prepare_payload/2 never references these fields — so a manifest carrying one
+  // is an initialise manifest sent to the wrong route, and saying so is more
+  // useful than silently building a snapshot the caller misunderstands.
+  it("rejects an agent block", () => {
+    const fields = errorsOf({ ...preparePayload, agent: { platform: "claude" } }).map((e) => e.field);
+    expect(fields).toContain("agent");
+  });
+
+  // Presence, not truthiness: an explicit null is still a caller that thinks this
+  // route takes an agent.
+  it("rejects an explicitly null agent block", () => {
+    expect(errorsOf({ ...preparePayload, agent: null }).map((e) => e.field)).toContain("agent");
+  });
+
+  it("rejects a user_identity block", () => {
+    const fields = errorsOf({ ...preparePayload, user_identity: { name: "A", email: "a@b.c" } }).map(
+      (e) => e.field,
+    );
+    expect(fields).toContain("user_identity");
+  });
+
+  it("applies the same repo rules as initialise", () => {
+    expect(errorsOf({ ...preparePayload, repos: [] }).map((e) => e.field)).toContain("repos");
+    expect(errorsOf({ repos: preparePayload.repos.map((r) => ({ ...r, primary: false })) }).map((e) => e.field))
+      .toContain("repos[].primary");
+    expect(errorsOf({ ...preparePayload, repos: [{ ...preparePayload.repos[0], url: "http://x/y" }] })
+      .map((e) => e.field)).toContain("repos[0].url");
+  });
+
+  it("applies the same credentials and setup_commands rules as initialise", () => {
+    expect(errorsOf({ ...preparePayload, credentials: { url: "https://cp/", token: "t" } })
+      .map((e) => e.field)).toContain("credentials.url");
+    expect(errorsOf({ ...preparePayload, setup_commands: [""] }).map((e) => e.field))
+      .toContain("setup_commands");
+  });
+
+  it("rejects a non-object body", () => {
+    expect(errorsOf(42).map((e) => e.field)).toEqual(["manifest"]);
   });
 });
