@@ -113,6 +113,8 @@ export function validatePrepare(input: unknown, env: Env = process.env): Prepare
     });
   }
 
+  rejectCredentialBearingRepoUrls(input.repos, errors);
+
   if (errors.length > 0) return { ok: false, errors };
 
   const repos = input.repos as Array<Record<string, unknown>>;
@@ -120,6 +122,46 @@ export function validatePrepare(input: unknown, env: Env = process.env): Prepare
   if (cross.length > 0) return { ok: false, errors: cross };
 
   return { ok: true, manifest: buildWorkspaceManifest(input, repos, env) };
+}
+
+/**
+ * Prepare-only, and deliberately not a rule `validate` shares.
+ *
+ * `https://x-access-token:ghs_…@github.com/…` is legal input on
+ * `/api/initialise` on purpose: this repo's own fixtures use that form,
+ * `redactTokens` exists to keep it out of logs and error messages, and
+ * `validateRepos`' `repos[].token` comment records the standing policy of not
+ * sending new 400s to an unchanged control plane.
+ *
+ * The asymmetry is the point. On a task sandbox a credential in the URL is a
+ * logging concern, and the sandbox dies with the task. On a snapshot it is a
+ * persistence hole: `git clone` writes the URL verbatim into
+ * `<dest>/.git/config` as `remote.origin.url`, that file lives under
+ * `workspaceRoot` and is captured by the filesystem image every task in the
+ * project boots from, and `deleteCredentialConfig` — which only ever touches
+ * `$HOME/.throng` — cannot reach it. `syncOrClone`'s remove-and-reclone branch
+ * does not help either: the fresh clone writes the same URL back.
+ *
+ * Checked here rather than through a flag threaded into the shared
+ * `validateRepos`, because it is a prepare policy and belongs beside the other
+ * two prepare-only rejections, not inside a function both routes call.
+ */
+function rejectCredentialBearingRepoUrls(value: unknown, errors: FieldError[]): void {
+  // A non-array is not this rule's problem: validateWorkspace has already
+  // reported it, and the 400 explains the shape before it explains the contents.
+  if (!Array.isArray(value)) return;
+  value.forEach((repo, i) => {
+    const url = isObject(repo) ? repo.url : undefined;
+    // Userinfo is everything before an `@` in the authority, so the character
+    // class stops at `/` to avoid matching an `@` in a later path segment.
+    if (typeof url === "string" && /^https:\/\/[^/@]*@/.test(url)) {
+      errors.push({
+        field: `repos[${i}].url`,
+        reason:
+          "must not embed credentials (user:pass@): git stores the URL verbatim in .git/config, which a snapshot keeps and the credential wipe cannot reach",
+      });
+    }
+  });
 }
 
 /** Every per-field rule both routes share. */

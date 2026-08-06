@@ -316,7 +316,57 @@ describe("validatePrepare", () => {
       .toContain("setup_commands");
   });
 
+  // Prepare-only, and the asymmetry with initialise is the point. git writes the
+  // clone URL verbatim into <dest>/.git/config, that file is inside the workspace
+  // the snapshot captures, and the credential wipe only reaches $HOME/.throng —
+  // so on this route a token in the URL is a credential baked into an image every
+  // task in the project boots from. On a task sandbox the same URL is a logging
+  // concern that redactTokens already handles, and rejecting it there would send
+  // new 400s to an unchanged control plane.
+  it("rejects a repo url with credentials embedded in it", () => {
+    const withCreds = (url: string) =>
+      errorsOf({ ...preparePayload, repos: [{ ...preparePayload.repos[0], url }] }).map((e) => e.field);
+
+    expect(withCreds("https://x-access-token:ghs_live@github.com/acme/web.git")).toContain("repos[0].url");
+    expect(withCreds("https://ghp_live@github.com/acme/web.git")).toContain("repos[0].url");
+  });
+
+  it("accepts an @ that is not userinfo", () => {
+    // A path segment, not an authority: git stores nothing sensitive here.
+    const r = validatePrepare(
+      { ...preparePayload, repos: [{ ...preparePayload.repos[0], url: "https://git.example/~@acme/web.git" }] },
+      {},
+    );
+    expect(r.ok).toBe(true);
+  });
+
   it("rejects a non-object body", () => {
     expect(errorsOf(42).map((e) => e.field)).toEqual(["manifest"]);
+  });
+});
+
+describe("validate (credential-bearing repo urls stay legal on initialise)", () => {
+  // The counterpart to the prepare rejection above. This form is deliberate
+  // input on /api/initialise — the fixtures in this repo use it and redactTokens
+  // exists for it — so a regression that moved the check into the shared repo
+  // rules would start 400ing an unchanged control plane. Pinned from both sides.
+  it("accepts a repo url with credentials embedded in it", () => {
+    const r = validate(
+      {
+        repos: [
+          {
+            url: "https://x-access-token:ghs_live@github.com/acme/web.git",
+            ref: "main",
+            dest: "web",
+            primary: true,
+          },
+        ],
+        agent: { platform: "test" },
+      },
+      registry,
+      {},
+    );
+
+    expect(r.ok).toBe(true);
   });
 });
