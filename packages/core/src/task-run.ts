@@ -79,7 +79,7 @@ export class TaskRun {
       this.lifecycle.set("ready");
       log.info("boot complete; agent is ready");
     } catch (err) {
-      this.failFrom(err);
+      this.reportFailure(err);
     }
   }
 
@@ -118,13 +118,30 @@ export class TaskRun {
       // than relying on reasoning about what git might print.
       const synced = await this.deps.syncOrClone(repo.url, dest, repo.ref);
       if (!synced.ok) {
+        // The ref is named as well as the operation: this string becomes the
+        // control plane's `instance.error_message`, usually the only diagnostic
+        // left once the sandbox is gone, and syncOrClone's branches
+        // (`checkout -f <ref>`, `reset --hard origin/<ref>`) are keyed on it. A
+        // task's ref can legitimately differ from the one its snapshot was built
+        // with, so "which ref" is the clue that identifies that failure.
+        // `?? "sync"` is a fallback for a caller that does not set `op`; every
+        // implementation in this repo does.
         throw new StepError(
           "cloning",
-          `git ${synced.op ?? "sync"} failed for ${repo.dest} (exit ${synced.code}): ${redactTokens(synced.output).trim()}`,
+          `git ${synced.op ?? "sync"} failed for ${repo.dest}@${repo.ref} (exit ${synced.code}): ${redactTokens(synced.output).trim()}`,
         );
       }
       log.info("repo ready", { dest, ref: repo.ref });
       if (repo.primary) primaryDest = dest;
+    }
+    // Guards the seam rather than a reachable input: validation accepts exactly
+    // one primary repo on every route today, so this cannot fire through the
+    // public API. It is here because the next caller of syncRepos evolves
+    // independently, and the silent failure it prevents is bad — an empty
+    // primaryDest makes runSetupCommands run in the process's working directory
+    // instead of the repo, and report success.
+    if (primaryDest === "") {
+      throw new StepError("cloning", "no repo was marked primary, so setup commands have nowhere to run");
     }
     return primaryDest;
   }
@@ -144,7 +161,7 @@ export class TaskRun {
     }
   }
 
-  private failFrom(err: unknown): void {
+  private reportFailure(err: unknown): void {
     const detail =
       err instanceof StepError
         ? { step: err.step, message: err.message }

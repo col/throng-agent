@@ -123,8 +123,10 @@ describe("TaskRun credential ordering", () => {
 
   // Sync runs WITH credentials in place under the pull model, and its output
   // lands verbatim in the control plane's instance.error_message — the same sink
-  // the setup path already redacts. `op` names which git command failed, which is
-  // the only thing lost by collapsing clone and checkout into one dep.
+  // the setup path already redacts. Collapsing clone and checkout into one dep
+  // costs nothing diagnostically: `op` names which git command failed and the ref
+  // is carried alongside it, so the message still identifies both the operation
+  // and what it was operating on.
   it.each([
     ["clone", "fatal: could not read Username for 'https://ghs_0123456789abcdefghij@github.com'"],
     ["checkout", "error: pathspec not found; remote was https://x-access-token:ghp_0123456789abcdefghij@github.com"],
@@ -137,7 +139,9 @@ describe("TaskRun credential ordering", () => {
 
     const status = tr.lifecycle.status();
     expect(status.error?.step).toBe("cloning");
-    expect(status.error?.message).toContain(`git ${op} failed`);
+    // The ref is the clue that a restored workspace was being moved to a
+    // different ref than the snapshot was built with, so it is pinned here.
+    expect(status.error?.message).toContain(`git ${op} failed for y@main`);
     expect(status.error?.message).toContain("[REDACTED]");
     expect(status.error?.message).not.toMatch(/gh[ps]_0123456789abcdefghij/);
   });
