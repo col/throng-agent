@@ -85,6 +85,12 @@ export function buildAgentConfig(
       advertiseProtocol: (process.env.ADVERTISE_PROTOCOL ?? "https") as "http" | "https",
     },
     claude,
+    // A Throng turn has no useful upper bound — a long build, a slow test suite
+    // or a deep refactor can legitimately run for hours, and cutting one off
+    // mid-flight loses the work. 0 disables the wrapper's prompt timeout
+    // entirely (a2a-claude >= 0.2.1-beta.3 treats any value <= 0 that way).
+    // Cancellation still works: the runtime aborts the turn on demand.
+    timeouts: { prompt: 0 },
   };
 
   return resolveConfig(undefined, overrides);

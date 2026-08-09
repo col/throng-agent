@@ -33,6 +33,13 @@ describe("buildAgentConfig", () => {
     expect(cfg.claude.permissionMode).toBe("acceptEdits");
   });
 
+  // Throng agent turns routinely run past the wrapper's ten-minute default, and
+  // a truncated turn is worse than a slow one. 0 disables the bound outright.
+  it("disables the wrapper's prompt timeout", () => {
+    const cfg = buildAgentConfig(manifest({}), "/work/app");
+    expect(cfg.timeouts.prompt).toBe(0);
+  });
+
   // The wrapper defaults marketplaces/enabledPlugins to {}, and omits the SDK
   // settings tier entirely while they are empty — so "no plugins" is {}, not unset.
   it("leaves the plugin channel empty when no plugins are configured", () => {
