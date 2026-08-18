@@ -5,6 +5,7 @@ import { EMPTY_PLUGINS, resolvePlugins, type ResolvedPlugins } from "../config/p
 const PERMISSION_MODES = new Set(["acceptEdits", "dontAsk", "plan", "bypassPermissions"]);
 const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 const THINKING_TYPES = new Set(["adaptive", "disabled", "enabled"]);
+const OUTPUT_FORMAT_TYPES = new Set(["json_schema"]);
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
@@ -62,6 +63,27 @@ export function validateClaudeAgent(
         errors.push({
           field: "agent.thinking.budget_tokens",
           reason: "must be an integer >= 1024 when type is enabled",
+        });
+      }
+    }
+    // Duplicates a2a-claude's own shape check on purpose. The wrapper validates
+    // in initialize(), so a bad value there fails the boot after initialise has
+    // already returned 202; validating here turns it into a field-level 400 at
+    // the API boundary, consistent with how permission_mode, model, effort and
+    // thinking are already handled. The `schema` body is
+    // deliberately not inspected — Throng does not own JSON Schema validity, and
+    // the SDK reports an unusable schema at turn time.
+    if ("output_format" in a) {
+      const o = a.output_format;
+      if (!isObject(o) || !OUTPUT_FORMAT_TYPES.has(o.type as string)) {
+        errors.push({
+          field: "agent.output_format",
+          reason: "must be an object with type json_schema",
+        });
+      } else if (!isObject(o.schema)) {
+        errors.push({
+          field: "agent.output_format.schema",
+          reason: "must be a JSON Schema object",
         });
       }
     }

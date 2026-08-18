@@ -73,6 +73,13 @@ export function buildAgentConfig(
   if (Array.isArray(a.disallowed_tools)) claude.disallowedTools = a.disallowed_tools as string[];
   if (typeof a.max_turns === "number") claude.maxTurns = a.max_turns;
 
+  // Structured output. Only the outer key is renamed — the schema body is JSON
+  // Schema's own vocabulary and is forwarded verbatim. Left unset when absent so
+  // the wrapper's freeform-text default holds.
+  if (a.output_format && typeof a.output_format === "object") {
+    claude.outputFormat = a.output_format as NonNullable<ClaudeConfig["outputFormat"]>;
+  }
+
   const overrides: Partial<AgentConfig> = {
     agentCard: {
       name: "Throng Agent A2A Claude",

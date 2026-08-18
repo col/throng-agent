@@ -181,4 +181,38 @@ describe("buildAgentConfig", () => {
     const cfg = buildAgentConfig(manifest({ thinking: { type: "adaptive" } }), "/work/app");
     expect(cfg.claude.thinking).not.toHaveProperty("display");
   });
+
+  it("maps output_format onto the wrapper's outputFormat", () => {
+    const outputFormat = {
+      type: "json_schema",
+      schema: { type: "object", properties: { status: { type: "string" } } },
+    };
+    const cfg = buildAgentConfig(manifest({ output_format: outputFormat }), "/work/app");
+    expect(cfg.claude.outputFormat).toEqual(outputFormat);
+  });
+
+  // Only the outer key is renamed. The schema body carries JSON Schema's own
+  // vocabulary (additionalProperties, required, …) and must survive untouched.
+  it("passes the schema body through without rewriting its keys", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["completed", "blocked"] },
+        documents_created: { type: "array", items: { type: "string" } },
+      },
+      required: ["status"],
+      additionalProperties: false,
+    };
+    const cfg = buildAgentConfig(
+      manifest({ output_format: { type: "json_schema", schema } }),
+      "/work/app",
+    );
+    expect(cfg.claude.outputFormat?.schema).toEqual(schema);
+  });
+
+  // Absent means "wrapper default" — freeform text — not an empty format object.
+  it("leaves outputFormat unset when the manifest omits it", () => {
+    const cfg = buildAgentConfig(manifest({}), "/work/app");
+    expect(cfg.claude.outputFormat).toBeUndefined();
+  });
 });
