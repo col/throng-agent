@@ -26,8 +26,10 @@ among the unwired `ClaudeConfig` fields deferred to a separate scope.
   (`throng-agent-claude/src/manifest/claude-agent.ts`), which validates a subset
   of fields and passes the rest through in `keys: Record<string, unknown>`.
 - Validation failures return HTTP 400 with `[{ field, reason }]` from the
-  initialise route (`packages/core/src/control/server.ts:44`), synchronously,
-  before any boot work happens.
+  initialise route (`packages/core/src/control/server.ts`), synchronously, before
+  any boot work happens. A manifest that validates returns 202 and boots
+  asynchronously, so a failure raised during boot is not visible on the
+  initialise response.
 - `buildAgentConfig` (`throng-agent-claude/src/config/build.ts`) maps `keys` onto
   the wrapper's `claude` config, then calls `resolveConfig(undefined, overrides)`.
 - In `0.2.1-beta.6` the wrapper exposes `outputFormat` as a top-level
@@ -41,9 +43,16 @@ among the unwired `ClaudeConfig` fields deferred to a separate scope.
   part on the `response` artifact, alongside the usual text part
   (`publishFinalArtifactWithData` / `publishLastChunkMarkerWithData` in
   `claude/executor.js`).
-- The text part is still published. It carries the SDK's `result` string, which
-  under a structured format is the JSON payload rather than prose. Consumers
-  reading only the text part therefore see JSON, not a natural-language summary.
+- The text part is still published, first, so text-only clients are unaffected.
+  It carries the SDK's `result` string. What that string contains under a
+  structured format is **not** established here: `result` and `structured_output`
+  are independent fields on `SDKResultSuccess`, and nothing in the SDK or wrapper
+  documents `result` being replaced by the JSON payload. Do not assert either way
+  in operator-facing docs without observing a real turn.
+- The data part is conditional. `responseParts` in the wrapper's
+  `claude/structured-artifact.js` appends it only when the structured value is a
+  non-null, **non-array** object. A schema whose top level is an array or scalar
+  produces no data part at all.
 - A new turn failure mode appears: the SDK retries when output does not satisfy
   the schema, and on exhaustion emits `error_max_structured_output_retries`,
   which the wrapper maps to a failed turn with

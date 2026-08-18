@@ -163,16 +163,20 @@ is not valid JSON Schema is reported by the SDK at turn time, not at initialise.
 
 Two consequences worth knowing before you enable it:
 
-- **The text part becomes JSON.** On success the parsed object is published as an
-  additive `application/json` data part on the `response` artifact, but the text
-  part is still published and now carries the JSON payload rather than prose. A
-  consumer reading only the text part gets JSON, not a natural-language summary.
+- **The structured result is an additional part, not a replacement.** On success
+  the parsed object is published as an `application/json` data part on the
+  `response` artifact, and the text part is still published alongside it, first —
+  text-only clients are unaffected. The data part is only added when the result
+  is a JSON **object**: a schema whose top level is an array or a scalar produces
+  no data part, and such a result reaches clients through the text part alone.
 - **An unsatisfiable schema fails the turn.** The SDK retries when output does
   not match, and on exhaustion the turn fails with *"Structured output retries
   exhausted."* It does not fall back to freeform text. A schema that no output
   can satisfy — for example one whose `required` names a property that
   `properties` never declares while `additionalProperties` is `false` — fails
-  every turn. Diagnose this as a schema bug, not a model problem.
+  every turn. That message usually means a schema bug, but not always: the SDK
+  reports the same exhaustion when structured output is retracted by a model
+  fallback, so rule out the schema before concluding the model is at fault.
 
 ### `credentials`, `github_token` and `user_identity`
 

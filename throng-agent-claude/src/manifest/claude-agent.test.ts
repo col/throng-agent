@@ -223,6 +223,17 @@ describe("validateClaudeAgent", () => {
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.output_format")).toBe(true);
   });
 
+  // The likeliest real-world mistake: the wrapper key is written but the schema
+  // itself is forgotten. An absent property reads as undefined, so this lands on
+  // the same branch as an explicitly bad schema.
+  it("rejects an output_format with no schema key at all", () => {
+    const r = validateClaudeAgent({ agent: { output_format: { type: "json_schema" } } }, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors.some((e) => e.field === "agent.output_format.schema")).toBe(true);
+    }
+  });
+
   it.each([["null", null], ["a string", "{}"], ["an array", []]])(
     "rejects an output_format whose schema is %s",
     (_label, schema) => {

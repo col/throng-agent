@@ -68,7 +68,7 @@ export function validateClaudeAgent(
     }
     // Duplicates a2a-claude's own shape check on purpose. The wrapper validates
     // in initialize(), so a bad value there fails the boot after initialise has
-    // already returned 200; validating here turns it into a field-level 400 at
+    // already returned 202; validating here turns it into a field-level 400 at
     // the API boundary, consistent with how permission_mode, model, effort and
     // thinking are already handled. The `schema` body is
     // deliberately not inspected — Throng does not own JSON Schema validity, and
