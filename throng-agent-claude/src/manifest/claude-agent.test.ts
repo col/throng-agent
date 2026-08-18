@@ -165,4 +165,72 @@ describe("validateClaudeAgent", () => {
       expect(r.agent.auth).toEqual({ type: "api_key", token: "sk-1" });
     }
   });
+
+  it("accepts a valid output_format and keeps it on keys", () => {
+    const outputFormat = {
+      type: "json_schema",
+      schema: { type: "object", properties: { status: { type: "string" } } },
+    };
+    const r = validateClaudeAgent({ agent: { output_format: outputFormat } }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.agent.keys.output_format).toEqual(outputFormat);
+  });
+
+  it("accepts an agent with no output_format", () => {
+    const r = validateClaudeAgent({ agent: {} }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) expect("output_format" in r.agent.keys).toBe(false);
+  });
+
+  // A JSON Schema body is passed through verbatim — its keys are JSON Schema's
+  // own vocabulary, so nothing here may rename them the way thinking's
+  // budget_tokens -> budgetTokens is renamed.
+  it("preserves a nested schema body exactly", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["completed", "blocked"] },
+        documents_created: { type: "array", items: { type: "string" } },
+      },
+      required: ["status"],
+      additionalProperties: false,
+    };
+    const r = validateClaudeAgent({ agent: { output_format: { type: "json_schema", schema } } }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect((r.agent.keys.output_format as Record<string, unknown>).schema).toEqual(schema);
+    }
+  });
+
+  it.each([["a string", "nope"], ["an array", []], ["null", null]])(
+    "rejects an output_format that is %s",
+    (_label, value) => {
+      const r = validateClaudeAgent({ agent: { output_format: value } }, {});
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.errors.some((e) => e.field === "agent.output_format")).toBe(true);
+    },
+  );
+
+  it("rejects an output_format type the SDK does not support", () => {
+    const r = validateClaudeAgent(
+      { agent: { output_format: { type: "text", schema: {} } } },
+      {},
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.output_format")).toBe(true);
+  });
+
+  it.each([["missing", undefined], ["a string", "{}"], ["an array", []]])(
+    "rejects an output_format whose schema is %s",
+    (_label, schema) => {
+      const r = validateClaudeAgent(
+        { agent: { output_format: { type: "json_schema", schema } } },
+        {},
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.errors.some((e) => e.field === "agent.output_format.schema")).toBe(true);
+      }
+    },
+  );
 });
