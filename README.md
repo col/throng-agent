@@ -47,6 +47,10 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
     "permission_mode": "plan", // engine-specific (claude)
     "thinking": { "type": "adaptive" }, // engine-specific (claude)
     "effort": "high",          // engine-specific (claude)
+    "output_format": {         // engine-specific (claude) — structured output
+      "type": "json_schema",
+      "schema": { "type": "object" }
+    },
     "plugins": []              // engine-specific (claude)
   }
 }
@@ -138,6 +142,37 @@ it.
     use `adaptive` together with `effort` instead.
 - **`effort`** is optional and sets the reasoning effort level: one of
   `low`, `medium`, `high`, `xhigh`, `max`.
+
+### `output_format` (claude)
+
+Optional. Constrains the model's turn output to a JSON Schema. Omit it and the
+agent returns freeform text, which is the default.
+
+```jsonc
+"output_format": {
+  "type": "json_schema",   // the only type the SDK supports
+  "schema": { /* any JSON Schema object */ }
+}
+```
+
+Throng validates the wrapper shape only — that `type` is `json_schema` and that
+`schema` is an object. The schema body is forwarded to the SDK **verbatim**; it
+is never inspected or key-transformed, so JSON Schema's own vocabulary
+(`additionalProperties`, `patternProperties`, …) survives intact. A schema that
+is not valid JSON Schema is reported by the SDK at turn time, not at initialise.
+
+Two consequences worth knowing before you enable it:
+
+- **The text part becomes JSON.** On success the parsed object is published as an
+  additive `application/json` data part on the `response` artifact, but the text
+  part is still published and now carries the JSON payload rather than prose. A
+  consumer reading only the text part gets JSON, not a natural-language summary.
+- **An unsatisfiable schema fails the turn.** The SDK retries when output does
+  not match, and on exhaustion the turn fails with *"Structured output retries
+  exhausted."* It does not fall back to freeform text. A schema that no output
+  can satisfy — for example one whose `required` names a property that
+  `properties` never declares while `additionalProperties` is `false` — fails
+  every turn. Diagnose this as a schema bug, not a model problem.
 
 ### `credentials`, `github_token` and `user_identity`
 
