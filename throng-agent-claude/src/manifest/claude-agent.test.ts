@@ -176,12 +176,6 @@ describe("validateClaudeAgent", () => {
     if (r.ok) expect(r.agent.keys.output_format).toEqual(outputFormat);
   });
 
-  it("accepts an agent with no output_format", () => {
-    const r = validateClaudeAgent({ agent: {} }, {});
-    expect(r.ok).toBe(true);
-    if (r.ok) expect("output_format" in r.agent.keys).toBe(false);
-  });
-
   // A JSON Schema body is passed through verbatim — its keys are JSON Schema's
   // own vocabulary, so nothing here may rename them the way thinking's
   // budget_tokens -> budgetTokens is renamed.
@@ -220,7 +214,16 @@ describe("validateClaudeAgent", () => {
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.output_format")).toBe(true);
   });
 
-  it.each([["missing", undefined], ["a string", "{}"], ["an array", []]])(
+  it("rejects an output_format with no type", () => {
+    const r = validateClaudeAgent(
+      { agent: { output_format: { schema: { type: "object" } } } },
+      {},
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "agent.output_format")).toBe(true);
+  });
+
+  it.each([["null", null], ["a string", "{}"], ["an array", []]])(
     "rejects an output_format whose schema is %s",
     (_label, schema) => {
       const r = validateClaudeAgent(
