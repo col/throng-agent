@@ -97,6 +97,13 @@ export function buildAgentConfig(
     // mid-flight loses the work. 0 disables the wrapper's prompt timeout
     // entirely (a2a-claude >= 0.2.1-beta.3 treats any value <= 0 that way).
     // Cancellation still works: the runtime aborts the turn on demand.
+    //
+    // Since a2a-claude 0.2.1-beta.7 the wrapper holds a Task open in `working`
+    // while Claude reports background work in flight, so a Task can span
+    // several SDK rounds. With the timeout off, cancellation is that Task's
+    // only automatic release — if the background set never empties the Task
+    // stays `working` and blocks later turns on the same contextId. Accepted:
+    // the alternative is killing hours-long legitimate work.
     timeouts: { prompt: 0 },
   };
 
