@@ -139,6 +139,13 @@ describe("TaskRun", () => {
     expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
   });
 
+  // The whole point of the feature: an agent asked to create a project from
+  // scratch has nothing to clone. `ensureWorkspace` is re-asserted here even
+  // though the one-repo test above already covers it, because this is the case
+  // BootDeps.ensureWorkspace exists for — with no repos nothing else creates
+  // the directory, so a future `if (repos.length > 0)` around that call would
+  // point the agent at a path that is not there and only this test would catch
+  // it. `syncOrClone` not being called is what proves no repo work happened.
   it("boots a zero-repo manifest and runs the agent in the workspace root", async () => {
     const d = deps();
     const claude = adapter();
@@ -152,6 +159,11 @@ describe("TaskRun", () => {
     expect(claude.buildAgentConfig).toHaveBeenCalledWith(expect.anything(), "/home/user/workspace");
   });
 
+  // Separate from the test above because it pins a different property: not that
+  // the agent starts, but that setup commands get a cwd at all. This is the
+  // failure resolveWorkingDirectory's no-primary guard describes — an unresolved
+  // working directory makes runSetupCommands run wherever the process happens to
+  // be and report success, so "which directory" is the assertion that matters.
   it("runs a zero-repo manifest's setup commands in the workspace root", async () => {
     const d = deps();
     const tr = new TaskRun(d, { claude: adapter() });
@@ -160,7 +172,16 @@ describe("TaskRun", () => {
     expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
   });
 
-  it("prepares a zero-repo manifest and still wipes credentials", async () => {
+  // A zero-repo prepare is the reason the empty list is legal on that route too:
+  // warming a toolchain cache into a snapshot from setup_commands alone. Both
+  // routes reach the new empty-repos branch through the shared
+  // materialiseWorkspace, so neither the cwd nor the credential wipe can be
+  // assumed safe from the boot-side tests. The wipe is a security boundary — a
+  // snapshot with a live credential on its filesystem is worse than no snapshot
+  // — and `prepared` is only reachable from the success path, so the two
+  // assertions together prove the success-path wipe rather than the catch-block
+  // one.
+  it("prepares a zero-repo manifest, running setup in the workspace root, and still wipes credentials", async () => {
     const d = deps();
     const tr = new TaskRun(d, { claude: adapter() });
     const r = await tr.prepare({ repos: [], setup_commands: ["mise install"] });
