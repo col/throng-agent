@@ -112,6 +112,28 @@ describe("TaskRun", () => {
     expect(status.error?.message).toContain("EACCES");
     expect(d.syncOrClone).not.toHaveBeenCalled();
   });
+
+  it("resolves the working directory before cloning, not after", async () => {
+    const order: string[] = [];
+    const d = deps({
+      ensureWorkspace: vi.fn(() => {
+        order.push("ensure");
+      }),
+      syncOrClone: vi.fn(async () => {
+        order.push("clone");
+        return { ok: true, output: "" };
+      }),
+      runSetupCommands: vi.fn(async () => {
+        order.push("setup");
+        return { ok: true };
+      }),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ ...okPayload, setup_commands: ["mise install"] });
+    await settle();
+    expect(order).toEqual(["ensure", "clone", "setup"]);
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
+  });
 });
 
 describe("TaskRun credential ordering", () => {

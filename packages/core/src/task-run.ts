@@ -134,8 +134,9 @@ export class TaskRun {
       // second copy of these methods: the shared call path is what keeps a
       // snapshot build and the task boot that restores from it from drifting.
       this.writeCredentials(manifest, "prepare");
-      const primaryDest = await this.syncRepos(manifest, "prepare");
-      await this.runSetup(manifest, primaryDest, "prepare");
+      const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
+      await this.syncRepos(manifest, "prepare");
+      await this.runSetup(manifest, workingDirectory, "prepare");
 
       // A security boundary, not tidiness — and specifically the DISK half of
       // one. Everything still on disk here is captured into an E2B-stored image
@@ -196,16 +197,19 @@ export class TaskRun {
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
       this.writeCredentials(manifest);
-      const primaryDest = await this.syncRepos(manifest);
-      await this.runSetup(manifest, primaryDest);
+      // Before the clone, so a manifest with no primary repo fails having done
+      // nothing rather than after pulling every repo over the network.
+      const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
+      await this.syncRepos(manifest);
+      await this.runSetup(manifest, workingDirectory);
 
       log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
       // Commit identity only. GitHub auth is no longer environment-based.
       this.deps.injectGitIdentity(manifest.user_identity);
 
-      const config = adapter.buildAgentConfig(manifest, primaryDest);
-      log.info("boot step: starting A2A server", { workingDirectory: primaryDest });
+      const config = adapter.buildAgentConfig(manifest, workingDirectory);
+      log.info("boot step: starting A2A server", { workingDirectory });
       try {
         this.serverHandle = await adapter.createA2AServer(config);
       } catch (err) {
@@ -236,8 +240,9 @@ export class TaskRun {
     }
   }
 
-  /** Returns the primary repo's destination — where setup commands run. */
-  private async syncRepos(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<string> {
+  /** Clones or resyncs every repo in the manifest. The working directory is
+   *  resolved separately, by resolveWorkingDirectory. */
+  private async syncRepos(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<void> {
     this.lifecycle.set("cloning");
     log.info(`${phase} step: cloning repos`, { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
     // Unconditional, not guarded on an empty repo list: it is idempotent where
@@ -248,7 +253,6 @@ export class TaskRun {
     } catch (err) {
       throw new StepError("cloning", err instanceof Error ? err.message : String(err));
     }
-    let primaryDest = "";
     for (const repo of manifest.repos) {
       const dest = join(this.deps.workspaceRoot, repo.dest);
       // `repos[].url` is whatever the caller sent, and the credential-in-URL
@@ -277,27 +281,16 @@ export class TaskRun {
         );
       }
       log.info("repo ready", { dest, ref: repo.ref });
-      if (repo.primary) primaryDest = dest;
     }
-    // Guards the seam rather than a reachable input: validation accepts exactly
-    // one primary repo on every route today, so this cannot fire through the
-    // public API. It is here because the next caller of syncRepos evolves
-    // independently, and the silent failure it prevents is bad — an empty
-    // primaryDest makes runSetupCommands run in the process's working directory
-    // instead of the repo, and report success.
-    if (primaryDest === "") {
-      throw new StepError("cloning", "no repo was marked primary, so setup commands have nowhere to run");
-    }
-    return primaryDest;
   }
 
-  private async runSetup(manifest: WorkspaceManifest, primaryDest: string, phase: Phase = "boot"): Promise<void> {
+  private async runSetup(manifest: WorkspaceManifest, cwd: string, phase: Phase = "boot"): Promise<void> {
     this.lifecycle.set("setup");
     // Setup commands run WITH working git and gh, because the credential config
     // is already in place. See describeSetupFailure: their output is redacted
     // before it leaves this process.
-    log.info(`${phase} step: running setup commands`, { count: manifest.setup_commands.length, cwd: primaryDest });
-    const setup = await this.deps.runSetupCommands(primaryDest, manifest.setup_commands);
+    log.info(`${phase} step: running setup commands`, { count: manifest.setup_commands.length, cwd });
+    const setup = await this.deps.runSetupCommands(cwd, manifest.setup_commands);
     if (!setup.ok) {
       // `describeSetupFailure` carries the failing command, a decoded signal exit
       // (137 = OOM-killed, the common one) and the tail of its output — without
