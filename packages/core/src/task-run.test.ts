@@ -16,6 +16,7 @@ function deps(over: Partial<BootDeps> = {}): BootDeps {
     writeCredentialConfig: vi.fn(() => {}),
     deleteCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
+    ensureWorkspace: vi.fn(() => {}),
     workspaceRoot: "/home/user/workspace",
     ...over,
   };
@@ -82,6 +83,28 @@ describe("TaskRun", () => {
     await tr.initialise(okPayload);
     await settle();
     expect(tr.lifecycle.status().error?.step).toBe("plugins");
+  });
+
+  it("ensures the workspace root exists before cloning", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+    expect(d.ensureWorkspace).toHaveBeenCalledWith("/home/user/workspace");
+  });
+
+  it("fails the boot when the workspace cannot be created", async () => {
+    const d = deps({
+      ensureWorkspace: vi.fn(() => {
+        throw new Error("EACCES: permission denied");
+      }),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+    const status = tr.lifecycle.status();
+    expect(status.state).toBe("failed");
+    expect(d.syncOrClone).not.toHaveBeenCalled();
   });
 });
 

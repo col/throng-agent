@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -99,6 +100,7 @@ export function defaultBootDeps(): BootDeps {
     writeCredentialConfig: (manifest) => writeCredentialConfig(manifest),
     deleteCredentialConfig: () => deleteCredentialConfig(),
     injectGitIdentity,
+    ensureWorkspace: (dir) => mkdirSync(dir, { recursive: true }),
     // `||` rather than `??` so a blank WORKSPACE_DIR falls back instead of
     // resolving every clone destination against "".
     workspaceRoot: process.env.WORKSPACE_DIR || join(homeDir(), "workspace"),

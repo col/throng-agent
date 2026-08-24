@@ -11,6 +11,7 @@ const bootDeps: BootDeps = {
   writeCredentialConfig: () => {},
   deleteCredentialConfig: () => {},
   injectGitIdentity: () => {},
+  ensureWorkspace: () => {},
   workspaceRoot: "/home/user/workspace",
 };
 const adapter: EngineAdapter<any, any> = {

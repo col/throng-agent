@@ -18,6 +18,15 @@ export interface BootDeps {
    *  prepared workspace is snapshotted. */
   deleteCredentialConfig: () => void;
   injectGitIdentity: (identity: UserIdentity) => void;
+  /** Creates `workspaceRoot` if it is absent. Recursive and idempotent.
+   *
+   *  Needed because nothing else creates it: today the directory exists only as
+   *  a side effect of `git clone` creating its destination's parents, so a
+   *  manifest with no repos would point the agent at a path that is not there.
+   *  Injected rather than called directly so the test suite's fake workspace
+   *  root — a path that does not exist and cannot be created on a developer
+   *  machine — stays inert. */
+  ensureWorkspace: (dir: string) => void;
   workspaceRoot: string;
 }
 
@@ -231,6 +240,14 @@ export class TaskRun {
   private async syncRepos(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<string> {
     this.lifecycle.set("cloning");
     log.info(`${phase} step: cloning repos`, { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
+    // Unconditional, not guarded on an empty repo list: it is idempotent where
+    // `git clone` would have created the directory anyway, and load-bearing
+    // where there are no repos to create it.
+    try {
+      this.deps.ensureWorkspace(this.deps.workspaceRoot);
+    } catch (err) {
+      throw new StepError("cloning", err instanceof Error ? err.message : String(err));
+    }
     let primaryDest = "";
     for (const repo of manifest.repos) {
       const dest = join(this.deps.workspaceRoot, repo.dest);
