@@ -163,8 +163,13 @@ The dest-uniqueness check stays outside the guard: it is already a no-op on an e
 with:
 
 ```typescript
-    expect(errorsOf({ ...preparePayload, repos: [] })).toEqual([]);
+    // Direct, not via errorsOf: that helper throws when validation succeeds, and
+    // an empty repo list is now a success on this route just as it is on
+    // initialise. The parity is the point of the assertion.
+    expect(validatePrepare({ ...preparePayload, repos: [] }, {}).ok).toBe(true);
 ```
+
+The assertion must NOT go through `errorsOf`. That helper (line ~284) does `if (r.ok) throw new Error("expected validation to fail")`, so any form of `expect(errorsOf(…)).toEqual([])` throws before the matcher runs and can never pass.
 
 The surrounding two assertions in that test (all-`primary: false`, and an `http://` url) stay unchanged — they are still the point of the test.
 
