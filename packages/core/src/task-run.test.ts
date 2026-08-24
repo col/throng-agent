@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteCredentialConfig, writeCredentialConfig } from "./creds/config.js";
 import { TaskRun, resolveWorkingDirectory, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
+import type { RepoSpec, WorkspaceManifest } from "./manifest/types.js";
 
 const handle: ServerHandle = { shutdown: vi.fn(async () => {}) };
 
@@ -473,8 +474,15 @@ describe("TaskRun.prepare credential wipe (real filesystem)", () => {
 
 describe("resolveWorkingDirectory", () => {
   const root = "/home/user/workspace";
-  const manifest = (repos: Array<{ url: string; ref: string; dest: string; primary: boolean }>) =>
-    ({ repos, credentials: null, github_token: null, setup_commands: [] }) as any;
+  // Typed rather than cast: if WorkspaceManifest gains a required field this
+  // stops compiling, which is the point. An `as any` here would keep building
+  // against a manifest shape the function no longer receives.
+  const manifest = (repos: RepoSpec[]): WorkspaceManifest => ({
+    repos,
+    credentials: null,
+    github_token: null,
+    setup_commands: [],
+  });
 
   it("returns the primary repo's destination", () => {
     const m = manifest([
