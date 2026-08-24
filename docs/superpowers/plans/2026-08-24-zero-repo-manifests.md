@@ -433,7 +433,12 @@ Expected: PASS, whole file.
 
 - [ ] **Step 7: Fix the other `BootDeps` construction site**
 
-`ensureWorkspace` is a required member, so every place that builds a `BootDeps` literal now fails to compile. There is one besides the test factory in Step 1: `packages/core/src/control/server.test.ts:8`. Add the member to it so the literal reads:
+`ensureWorkspace` is a required member, so every place that builds a `BootDeps` literal must gain it. There are TWO besides the test factory in Step 1:
+
+- `packages/core/src/control/server.test.ts:8`
+- `throng-agent/src/integration/boot.test.ts` — easy to miss, and typecheck will NOT catch it: `throng-agent/tsconfig.json` excludes `src/**/*.test.ts`. The boot there fails at runtime with `this.deps.ensureWorkspace is not a function`, which that test's loose assertion swallows as a pass.
+
+Add `ensureWorkspace: vi.fn(() => {})` to both. For `server.test.ts:8` the literal reads:
 
 ```typescript
 const bootDeps: BootDeps = {
@@ -451,10 +456,10 @@ Then confirm there are no others:
 
 ```bash
 npm run typecheck
-grep -rn "BootDeps" --include="*.ts" packages throng-agent-claude throng-agent-codex | grep -v node_modules
+grep -rln "BootDeps" --include="*.ts" packages throng-agent throng-agent-claude throng-agent-codex | grep -v node_modules
 ```
 
-Expected: typecheck PASSes. If it still reports a missing `ensureWorkspace` somewhere, add `ensureWorkspace: () => {}` there too and re-run.
+Note `throng-agent` in that list. Omitting it is exactly how the `boot.test.ts` site gets missed, and typecheck does not cover it. Expected: typecheck PASSes and every `BootDeps` literal the grep surfaces has the new member. Do not rely on typecheck alone.
 
 - [ ] **Step 8: Commit**
 
