@@ -39,14 +39,6 @@ describe("validate (registry routing)", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.platform")).toBe(true);
   });
-  it("requires exactly one primary repo", () => {
-    const r = validate(
-      { agent: { platform: "test" }, repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: false }] },
-      registry,
-    );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.some((e) => e.field === "repos[].primary")).toBe(true);
-  });
   it("builds a manifest with resolved platform + selected adapter", () => {
     const r = validate(okInput, registry);
     expect(r.ok).toBe(true);
@@ -66,9 +58,12 @@ describe("validate (empty repo list)", () => {
     if (r.ok) expect(r.manifest.repos).toEqual([]);
   });
 
-  // The pair matters. Dropping the primary rule outright rather than making it
-  // conditional would also pass the case above, and would let a real multi-repo
-  // manifest through with no primary — which syncRepos has no cwd for.
+  // The pair matters, which is why the primary rule is pinned here rather than
+  // among the routing tests where it used to live. Dropping the rule outright
+  // instead of making it conditional would also pass the case above, and would
+  // let a real manifest through with no primary — which syncRepos has no cwd
+  // for. Note this fires for a single-repo list too: `primary` names the
+  // directory the agent runs in, so one repo must still claim it.
   it("still requires exactly one primary when repos is non-empty", () => {
     const r = validate(
       { repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: false }], agent: { platform: "test" } },
