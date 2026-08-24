@@ -104,6 +104,12 @@ describe("TaskRun", () => {
     await settle();
     const status = tr.lifecycle.status();
     expect(status.state).toBe("failed");
+    // Pinned to the step and the message, not just "failed": `cloning` labels
+    // two different failures in syncRepos — this one and a git sync error — so
+    // without the message this would still pass if the mkdir throw were
+    // swallowed and the sync failed instead.
+    expect(status.error?.step).toBe("cloning");
+    expect(status.error?.message).toContain("EACCES");
     expect(d.syncOrClone).not.toHaveBeenCalled();
   });
 });
