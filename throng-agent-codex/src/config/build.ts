@@ -5,8 +5,9 @@ import type { ResolvedCodexAgent } from "../manifest/codex-agent.js";
 /**
  * Builds a fully-defaulted a2a-codex config: a Throng base (name + full host
  * isolation + a deterministic bind) overlaid with the manifest's `agent` keys
- * and the primary repo as the working directory. `resolveConfig(undefined,
- * overrides)` applies a2a-codex's own DEFAULTS underneath our overrides.
+ * and the caller's working directory — the primary repo, or the workspace root
+ * when the manifest carries no repos. `resolveConfig(undefined, overrides)`
+ * applies a2a-codex's own DEFAULTS underneath our overrides.
  *
  * The `server` block is pinned explicitly (rather than left to a2a-codex's
  * env-var merge) so a container's HOSTNAME/PORT can never perturb the bind —

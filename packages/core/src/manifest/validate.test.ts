@@ -61,8 +61,8 @@ describe("validate (empty repo list)", () => {
   // The pair matters, which is why the primary rule is pinned here rather than
   // among the routing tests where it used to live. Dropping the rule outright
   // instead of making it conditional would also pass the case above, and would
-  // let a real manifest through with no primary — which syncRepos has no cwd
-  // for. Note this fires for a single-repo list too: `primary` names the
+  // let a real manifest through with no primary — which resolveWorkingDirectory
+  // has no cwd for. Note this fires for a single-repo list too: `primary` names the
   // directory the agent runs in, so one repo must still claim it.
   it("still requires exactly one primary when repos is non-empty", () => {
     const r = validate(

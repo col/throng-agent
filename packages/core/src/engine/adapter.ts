@@ -31,8 +31,12 @@ export interface EngineAdapter<TAgent = unknown, TConfig = unknown> {
   /** Inject the engine credential(s) into the process and run engine preflight. */
   injectCredentials(manifest: Manifest<TAgent>): void;
 
-  /** Build the engine server config from the resolved manifest. */
-  buildAgentConfig(manifest: Manifest<TAgent>, primaryDest: string): TConfig;
+  /** Build the engine server config from the resolved manifest.
+   *
+   *  `workingDirectory` is the primary repo's destination, or the workspace root
+   *  when the manifest carries no repos — so it is not necessarily a repository.
+   *  See resolveWorkingDirectory. */
+  buildAgentConfig(manifest: Manifest<TAgent>, workingDirectory: string): TConfig;
 
   /** Start the engine's A2A server. */
   createA2AServer(config: TConfig): Promise<ServerHandle>;
