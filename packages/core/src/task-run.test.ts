@@ -496,6 +496,14 @@ describe("resolveWorkingDirectory", () => {
     expect(resolveWorkingDirectory(manifest([]), root)).toBe(root);
   });
 
+  // validateRepos permits a dest with subdirectories — it rejects only absolute
+  // paths, ".." segments and anything resolving to the workspace root itself —
+  // so a nested dest is real input, not a hypothetical.
+  it("joins a nested dest under the workspace root", () => {
+    const m = manifest([{ url: "https://x/a", ref: "main", dest: "team/svc", primary: true }]);
+    expect(resolveWorkingDirectory(m, root)).toBe("/home/user/workspace/team/svc");
+  });
+
   // Unreachable through the public API — validation demands exactly one primary
   // for a non-empty list — but the silent failure it prevents is bad: an empty
   // cwd makes runSetupCommands run in the process's own directory and report
