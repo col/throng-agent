@@ -313,6 +313,34 @@ export class TaskRun {
   }
 }
 
+/**
+ * Where the agent runs, and where `setup_commands` run: the primary repo's
+ * destination, or the workspace root when the manifest carries no repos.
+ *
+ * Separate from `syncRepos` — which only clones — because these are two
+ * questions, and only one of them has an answer that depends on the network
+ * having succeeded. Keeping the resolution pure also means the no-primary case
+ * below is a function contract rather than a loop invariant over a mutable
+ * accumulator, and it is testable without mocking git.
+ */
+export function resolveWorkingDirectory(manifest: WorkspaceManifest, workspaceRoot: string): string {
+  // An empty workspace is legal input: the agent's job may be to create the
+  // project. The workspace root is where cloned repos live, so a repository the
+  // agent creates there is in the layout a later task's manifest will expect.
+  if (manifest.repos.length === 0) return workspaceRoot;
+
+  const primary = manifest.repos.find((r) => r.primary);
+  // Guards the seam rather than a reachable input: validation accepts exactly
+  // one primary for a non-empty list on both routes, so this cannot fire through
+  // the public API. It is here because the silent failure it prevents is bad —
+  // an empty working directory makes runSetupCommands run in the process's own
+  // working directory instead of the repo, and report success.
+  if (!primary) {
+    throw new StepError("cloning", "no repo was marked primary, so setup commands have nowhere to run");
+  }
+  return join(workspaceRoot, primary.dest);
+}
+
 class StepError extends Error {
   constructor(readonly step: string, message: string) {
     super(message);

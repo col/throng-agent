@@ -1,6 +1,7 @@
 export { startControlServer, buildServer, createControlApp, defaultBootDeps } from "./control/server.js";
 export {
   TaskRun,
+  resolveWorkingDirectory,
   type BootDeps,
   type BootAcceptance,
   type InitialiseResult,

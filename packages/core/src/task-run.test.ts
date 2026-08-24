@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteCredentialConfig, writeCredentialConfig } from "./creds/config.js";
-import { TaskRun, type BootDeps } from "./task-run.js";
+import { TaskRun, resolveWorkingDirectory, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
 
 const handle: ServerHandle = { shutdown: vi.fn(async () => {}) };
@@ -468,5 +468,32 @@ describe("TaskRun.prepare credential wipe (real filesystem)", () => {
     // renamed or backup copy of the config, say — which neither existsSync would
     // see.
     expect(readdirSync(join(home, ".throng"))).toEqual([]);
+  });
+});
+
+describe("resolveWorkingDirectory", () => {
+  const root = "/home/user/workspace";
+  const manifest = (repos: Array<{ url: string; ref: string; dest: string; primary: boolean }>) =>
+    ({ repos, credentials: null, github_token: null, setup_commands: [] }) as any;
+
+  it("returns the primary repo's destination", () => {
+    const m = manifest([
+      { url: "https://x/a", ref: "main", dest: "a", primary: false },
+      { url: "https://x/b", ref: "main", dest: "b", primary: true },
+    ]);
+    expect(resolveWorkingDirectory(m, root)).toBe("/home/user/workspace/b");
+  });
+
+  it("returns the workspace root when there are no repos", () => {
+    expect(resolveWorkingDirectory(manifest([]), root)).toBe(root);
+  });
+
+  // Unreachable through the public API — validation demands exactly one primary
+  // for a non-empty list — but the silent failure it prevents is bad: an empty
+  // cwd makes runSetupCommands run in the process's own directory and report
+  // success.
+  it("throws when a non-empty list has no primary", () => {
+    const m = manifest([{ url: "https://x/a", ref: "main", dest: "a", primary: false }]);
+    expect(() => resolveWorkingDirectory(m, root)).toThrow(/no repo was marked primary/);
   });
 });
