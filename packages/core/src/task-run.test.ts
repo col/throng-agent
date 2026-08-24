@@ -113,7 +113,11 @@ describe("TaskRun", () => {
     expect(d.syncOrClone).not.toHaveBeenCalled();
   });
 
-  it("resolves the working directory before cloning, not after", async () => {
+  // Named for what it can actually observe. With one always-resolvable primary
+  // repo the resolution is not separately visible — what this pins is that the
+  // three steps still happen in order and that setup gets the resolved cwd,
+  // which is the property the resolver extraction had to preserve.
+  it("ensures, clones, then runs setup in the resolved working directory", async () => {
     const order: string[] = [];
     const d = deps({
       ensureWorkspace: vi.fn(() => {

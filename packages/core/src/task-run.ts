@@ -128,15 +128,17 @@ export class TaskRun {
 
   private async prepareWorkspace(manifest: WorkspaceManifest): Promise<void> {
     try {
-      // Same three methods boot() calls, with only the log prefix differing —
+      // The same methods boot() calls, with only the log prefix differing —
       // "boot step: cloning repos" from a run that never boots an agent sends an
       // operator looking for the wrong thing. A defaulted parameter rather than a
       // second copy of these methods: the shared call path is what keeps a
       // snapshot build and the task boot that restores from it from drifting.
+      //
+      // The returned working directory is discarded here on purpose: a prepare
+      // builds a filesystem image and never starts an agent, so nothing after
+      // this point needs to know where one would have run.
       this.writeCredentials(manifest, "prepare");
-      const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
-      await this.syncRepos(manifest, "prepare");
-      await this.runSetup(manifest, workingDirectory, "prepare");
+      await this.materialiseWorkspace(manifest, "prepare");
 
       // A security boundary, not tidiness — and specifically the DISK half of
       // one. Everything still on disk here is captured into an E2B-stored image
@@ -197,11 +199,7 @@ export class TaskRun {
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
       this.writeCredentials(manifest);
-      // Before the clone, so a manifest with no primary repo fails having done
-      // nothing rather than after pulling every repo over the network.
-      const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
-      await this.syncRepos(manifest);
-      await this.runSetup(manifest, workingDirectory);
+      const workingDirectory = await this.materialiseWorkspace(manifest);
 
       log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
@@ -238,6 +236,35 @@ export class TaskRun {
     } catch (err) {
       throw new StepError("credentials", err instanceof Error ? err.message : String(err));
     }
+  }
+
+  /**
+   * Brings the workspace to the state an agent (or a snapshot) can be handed:
+   * decide where the agent runs, put the repos on disk, then run the setup
+   * commands there. Returns that working directory.
+   *
+   * One method rather than three calls at each of the two call sites, because
+   * the ORDER is a correctness property and this is the only place that has to
+   * be trusted to keep it. Setup commands must run after the clone — they are
+   * `mise install` and `npm ci` against a tree that has to exist — and until
+   * this refactor that was enforced by the type system: `runSetup` took the
+   * destination that only a completed `syncRepos` could return, so the two
+   * could not be reordered or interleaved without a compile error. Splitting
+   * resolution out removed that data dependency, and a comment is a weaker
+   * guarantee than a signature. Returning the directory from the method that
+   * also performs the steps restores it: a caller cannot obtain a working
+   * directory without having awaited the whole sequence.
+   *
+   * `phase` only labels the logs — a prepare run that never boots an agent must
+   * not emit "boot step: cloning repos" at an operator hunting a failure.
+   */
+  private async materialiseWorkspace(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<string> {
+    // Resolved before the clone, so a manifest with no primary repo fails having
+    // done nothing rather than after pulling every repo over the network.
+    const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
+    await this.syncRepos(manifest, phase);
+    await this.runSetup(manifest, workingDirectory, phase);
+    return workingDirectory;
   }
 
   /** Clones or resyncs every repo in the manifest. The working directory is
