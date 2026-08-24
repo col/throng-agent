@@ -138,6 +138,38 @@ describe("TaskRun", () => {
     expect(order).toEqual(["ensure", "clone", "setup"]);
     expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
   });
+
+  it("boots a zero-repo manifest and runs the agent in the workspace root", async () => {
+    const d = deps();
+    const claude = adapter();
+    const tr = new TaskRun(d, { claude });
+    const r = await tr.initialise({ repos: [], agent: { platform: "claude" } });
+    expect(r).toEqual({ ok: true, status: "booting" });
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("ready");
+    expect(d.syncOrClone).not.toHaveBeenCalled();
+    expect(d.ensureWorkspace).toHaveBeenCalledWith("/home/user/workspace");
+    expect(claude.buildAgentConfig).toHaveBeenCalledWith(expect.anything(), "/home/user/workspace");
+  });
+
+  it("runs a zero-repo manifest's setup commands in the workspace root", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ repos: [], agent: { platform: "claude" }, setup_commands: ["mise install"] });
+    await settle();
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
+  });
+
+  it("prepares a zero-repo manifest and still wipes credentials", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    const r = await tr.prepare({ repos: [], setup_commands: ["mise install"] });
+    expect(r).toEqual({ ok: true, status: "booting" });
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("prepared");
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
+    expect(d.deleteCredentialConfig).toHaveBeenCalled();
+  });
 });
 
 describe("TaskRun credential ordering", () => {

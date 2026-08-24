@@ -30,7 +30,7 @@ describe("control server", () => {
   it("GET /api/status → uninitialised", async () => {
     expect((await request(app()).get("/api/status")).body.state).toBe("uninitialised");
   });
-  it("POST /api/initialise bad manifest → 400 list", async () => {
+  it("POST /api/initialise missing agent block → 400 list", async () => {
     const res = await request(app()).post("/api/initialise").send({ repos: [] });
     expect(res.status).toBe(400);
     expect(Array.isArray(res.body)).toBe(true);
@@ -41,6 +41,18 @@ describe("control server", () => {
   });
   it("POST /api/initialise valid → 202 booting", async () => {
     const res = await request(app()).post("/api/initialise").send({ repos: goodRepos, agent: { platform: "claude" } });
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ status: "booting" });
+  });
+
+  it("POST /api/initialise with repos: [] → 202 booting", async () => {
+    const res = await request(app()).post("/api/initialise").send({ repos: [], agent: { platform: "claude" } });
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ status: "booting" });
+  });
+
+  it("POST /api/prepare with repos: [] → 202 booting", async () => {
+    const res = await request(app()).post("/api/prepare").send({ repos: [] });
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ status: "booting" });
   });
