@@ -18,6 +18,15 @@ export interface BootDeps {
    *  prepared workspace is snapshotted. */
   deleteCredentialConfig: () => void;
   injectGitIdentity: (identity: UserIdentity) => void;
+  /** Creates `workspaceRoot` if it is absent. Recursive and idempotent.
+   *
+   *  Needed because nothing else creates it: today the directory exists only as
+   *  a side effect of `git clone` creating its destination's parents, so a
+   *  manifest with no repos would point the agent at a path that is not there.
+   *  Injected rather than called directly so the test suite's fake workspace
+   *  root — a path that does not exist and cannot be created on a developer
+   *  machine — stays inert. */
+  ensureWorkspace: (dir: string) => void;
   workspaceRoot: string;
 }
 
@@ -119,14 +128,17 @@ export class TaskRun {
 
   private async prepareWorkspace(manifest: WorkspaceManifest): Promise<void> {
     try {
-      // Same three methods boot() calls, with only the log prefix differing —
+      // The same methods boot() calls, with only the log prefix differing —
       // "boot step: cloning repos" from a run that never boots an agent sends an
       // operator looking for the wrong thing. A defaulted parameter rather than a
       // second copy of these methods: the shared call path is what keeps a
       // snapshot build and the task boot that restores from it from drifting.
+      //
+      // The returned working directory is discarded here on purpose: a prepare
+      // builds a filesystem image and never starts an agent, so nothing after
+      // this point needs to know where one would have run.
       this.writeCredentials(manifest, "prepare");
-      const primaryDest = await this.syncRepos(manifest, "prepare");
-      await this.runSetup(manifest, primaryDest, "prepare");
+      await this.materialiseWorkspace(manifest, "prepare");
 
       // A security boundary, not tidiness — and specifically the DISK half of
       // one. Everything still on disk here is captured into an E2B-stored image
@@ -187,16 +199,15 @@ export class TaskRun {
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
       this.writeCredentials(manifest);
-      const primaryDest = await this.syncRepos(manifest);
-      await this.runSetup(manifest, primaryDest);
+      const workingDirectory = await this.materialiseWorkspace(manifest);
 
       log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
       // Commit identity only. GitHub auth is no longer environment-based.
       this.deps.injectGitIdentity(manifest.user_identity);
 
-      const config = adapter.buildAgentConfig(manifest, primaryDest);
-      log.info("boot step: starting A2A server", { workingDirectory: primaryDest });
+      const config = adapter.buildAgentConfig(manifest, workingDirectory);
+      log.info("boot step: starting A2A server", { workingDirectory });
       try {
         this.serverHandle = await adapter.createA2AServer(config);
       } catch (err) {
@@ -227,11 +238,48 @@ export class TaskRun {
     }
   }
 
-  /** Returns the primary repo's destination — where setup commands run. */
-  private async syncRepos(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<string> {
+  /**
+   * Brings the workspace to the state an agent (or a snapshot) can be handed:
+   * decide where the agent runs, put the repos on disk, then run the setup
+   * commands there. Returns that working directory.
+   *
+   * One method rather than three calls at each of the two call sites, because
+   * the ORDER is a correctness property and this is the only place that has to
+   * be trusted to keep it. Setup commands must run after the clone — they are
+   * `mise install` and `npm ci` against a tree that has to exist — and until
+   * this refactor that was enforced by the type system: `runSetup` took the
+   * destination that only a completed `syncRepos` could return, so the two
+   * could not be reordered or interleaved without a compile error. Splitting
+   * resolution out removed that data dependency, and a comment is a weaker
+   * guarantee than a signature. Returning the directory from the method that
+   * also performs the steps restores it: a caller cannot obtain a working
+   * directory without having awaited the whole sequence.
+   *
+   * `phase` only labels the logs — a prepare run that never boots an agent must
+   * not emit "boot step: cloning repos" at an operator hunting a failure.
+   */
+  private async materialiseWorkspace(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<string> {
+    // Resolved before the clone, so a manifest with no primary repo fails having
+    // done nothing rather than after pulling every repo over the network.
+    const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
+    await this.syncRepos(manifest, phase);
+    await this.runSetup(manifest, workingDirectory, phase);
+    return workingDirectory;
+  }
+
+  /** Clones or resyncs every repo in the manifest. The working directory is
+   *  resolved separately, by resolveWorkingDirectory. */
+  private async syncRepos(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<void> {
     this.lifecycle.set("cloning");
     log.info(`${phase} step: cloning repos`, { count: manifest.repos.length, workspace: this.deps.workspaceRoot });
-    let primaryDest = "";
+    // Unconditional, not guarded on an empty repo list: it is idempotent where
+    // `git clone` would have created the directory anyway, and load-bearing
+    // where there are no repos to create it.
+    try {
+      this.deps.ensureWorkspace(this.deps.workspaceRoot);
+    } catch (err) {
+      throw new StepError("cloning", err instanceof Error ? err.message : String(err));
+    }
     for (const repo of manifest.repos) {
       const dest = join(this.deps.workspaceRoot, repo.dest);
       // `repos[].url` is whatever the caller sent, and the credential-in-URL
@@ -260,27 +308,16 @@ export class TaskRun {
         );
       }
       log.info("repo ready", { dest, ref: repo.ref });
-      if (repo.primary) primaryDest = dest;
     }
-    // Guards the seam rather than a reachable input: validation accepts exactly
-    // one primary repo on every route today, so this cannot fire through the
-    // public API. It is here because the next caller of syncRepos evolves
-    // independently, and the silent failure it prevents is bad — an empty
-    // primaryDest makes runSetupCommands run in the process's working directory
-    // instead of the repo, and report success.
-    if (primaryDest === "") {
-      throw new StepError("cloning", "no repo was marked primary, so setup commands have nowhere to run");
-    }
-    return primaryDest;
   }
 
-  private async runSetup(manifest: WorkspaceManifest, primaryDest: string, phase: Phase = "boot"): Promise<void> {
+  private async runSetup(manifest: WorkspaceManifest, cwd: string, phase: Phase = "boot"): Promise<void> {
     this.lifecycle.set("setup");
     // Setup commands run WITH working git and gh, because the credential config
     // is already in place. See describeSetupFailure: their output is redacted
     // before it leaves this process.
-    log.info(`${phase} step: running setup commands`, { count: manifest.setup_commands.length, cwd: primaryDest });
-    const setup = await this.deps.runSetupCommands(primaryDest, manifest.setup_commands);
+    log.info(`${phase} step: running setup commands`, { count: manifest.setup_commands.length, cwd });
+    const setup = await this.deps.runSetupCommands(cwd, manifest.setup_commands);
     if (!setup.ok) {
       // `describeSetupFailure` carries the failing command, a decoded signal exit
       // (137 = OOM-killed, the common one) and the tail of its output — without
@@ -311,6 +348,34 @@ export class TaskRun {
   async shutdown(): Promise<void> {
     await this.serverHandle?.shutdown();
   }
+}
+
+/**
+ * Where the agent runs, and where `setup_commands` run: the primary repo's
+ * destination, or the workspace root when the manifest carries no repos.
+ *
+ * Separate from `syncRepos` — which only clones — because these are two
+ * questions, and only one of them has an answer that depends on the network
+ * having succeeded. Keeping the resolution pure also means the no-primary case
+ * below is a function contract rather than a loop invariant over a mutable
+ * accumulator, and it is testable without mocking git.
+ */
+export function resolveWorkingDirectory(manifest: WorkspaceManifest, workspaceRoot: string): string {
+  // An empty workspace is legal input: the agent's job may be to create the
+  // project. The workspace root is where cloned repos live, so a repository the
+  // agent creates there is in the layout a later task's manifest will expect.
+  if (manifest.repos.length === 0) return workspaceRoot;
+
+  const primary = manifest.repos.find((r) => r.primary);
+  // Guards the seam rather than a reachable input: validation accepts exactly
+  // one primary for a non-empty list on both routes, so this cannot fire through
+  // the public API. It is here because the silent failure it prevents is bad —
+  // an empty working directory makes runSetupCommands run in the process's own
+  // working directory instead of the repo, and report success.
+  if (!primary) {
+    throw new StepError("cloning", "no repo was marked primary, so setup commands have nowhere to run");
+  }
+  return join(workspaceRoot, primary.dest);
 }
 
 class StepError extends Error {

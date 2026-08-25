@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteCredentialConfig, writeCredentialConfig } from "./creds/config.js";
-import { TaskRun, type BootDeps } from "./task-run.js";
+import { TaskRun, resolveWorkingDirectory, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
+import type { RepoSpec, WorkspaceManifest } from "./manifest/types.js";
 
 const handle: ServerHandle = { shutdown: vi.fn(async () => {}) };
 
@@ -15,6 +16,7 @@ function deps(over: Partial<BootDeps> = {}): BootDeps {
     writeCredentialConfig: vi.fn(() => {}),
     deleteCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
+    ensureWorkspace: vi.fn(() => {}),
     workspaceRoot: "/home/user/workspace",
     ...over,
   };
@@ -81,6 +83,113 @@ describe("TaskRun", () => {
     await tr.initialise(okPayload);
     await settle();
     expect(tr.lifecycle.status().error?.step).toBe("plugins");
+  });
+
+  it("ensures the workspace root exists before cloning", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+    expect(d.ensureWorkspace).toHaveBeenCalledWith("/home/user/workspace");
+  });
+
+  it("fails the boot when the workspace cannot be created", async () => {
+    const d = deps({
+      ensureWorkspace: vi.fn(() => {
+        throw new Error("EACCES: permission denied");
+      }),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise(okPayload);
+    await settle();
+    const status = tr.lifecycle.status();
+    expect(status.state).toBe("failed");
+    // Pinned to the step and the message, not just "failed": `cloning` labels
+    // two different failures in syncRepos — this one and a git sync error — so
+    // without the message this would still pass if the mkdir throw were
+    // swallowed and the sync failed instead.
+    expect(status.error?.step).toBe("cloning");
+    expect(status.error?.message).toContain("EACCES");
+    expect(d.syncOrClone).not.toHaveBeenCalled();
+  });
+
+  // Named for what it can actually observe. With one always-resolvable primary
+  // repo the resolution is not separately visible — what this pins is that the
+  // three steps still happen in order and that setup gets the resolved cwd,
+  // which is the property the resolver extraction had to preserve.
+  it("ensures, clones, then runs setup in the resolved working directory", async () => {
+    const order: string[] = [];
+    const d = deps({
+      ensureWorkspace: vi.fn(() => {
+        order.push("ensure");
+      }),
+      syncOrClone: vi.fn(async () => {
+        order.push("clone");
+        return { ok: true, output: "" };
+      }),
+      runSetupCommands: vi.fn(async () => {
+        order.push("setup");
+        return { ok: true };
+      }),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ ...okPayload, setup_commands: ["mise install"] });
+    await settle();
+    expect(order).toEqual(["ensure", "clone", "setup"]);
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
+  });
+
+  // The whole point of the feature: an agent asked to create a project from
+  // scratch has nothing to clone. `ensureWorkspace` is re-asserted here even
+  // though the one-repo test above already covers it, because this is the case
+  // BootDeps.ensureWorkspace exists for — with no repos nothing else creates
+  // the directory, so a future `if (repos.length > 0)` around that call would
+  // point the agent at a path that is not there and only this test would catch
+  // it. `syncOrClone` not being called is what proves no repo work happened.
+  it("boots a zero-repo manifest and runs the agent in the workspace root", async () => {
+    const d = deps();
+    const claude = adapter();
+    const tr = new TaskRun(d, { claude });
+    const r = await tr.initialise({ repos: [], agent: { platform: "claude" } });
+    expect(r).toEqual({ ok: true, status: "booting" });
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("ready");
+    expect(d.syncOrClone).not.toHaveBeenCalled();
+    expect(d.ensureWorkspace).toHaveBeenCalledWith("/home/user/workspace");
+    expect(claude.buildAgentConfig).toHaveBeenCalledWith(expect.anything(), "/home/user/workspace");
+  });
+
+  // Separate from the test above because it pins a different property: not that
+  // the agent starts, but that setup commands get a cwd at all. This is the
+  // failure resolveWorkingDirectory's no-primary guard describes — an unresolved
+  // working directory makes runSetupCommands run wherever the process happens to
+  // be and report success, so "which directory" is the assertion that matters.
+  it("runs a zero-repo manifest's setup commands in the workspace root", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ repos: [], agent: { platform: "claude" }, setup_commands: ["mise install"] });
+    await settle();
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
+  });
+
+  // A zero-repo prepare is the reason the empty list is legal on that route too:
+  // warming a toolchain cache into a snapshot from setup_commands alone. Both
+  // routes reach the new empty-repos branch through the shared
+  // materialiseWorkspace, so neither the cwd nor the credential wipe can be
+  // assumed safe from the boot-side tests. The wipe is a security boundary — a
+  // snapshot with a live credential on its filesystem is worse than no snapshot
+  // — and `prepared` is only reachable from the success path, so the two
+  // assertions together prove the success-path wipe rather than the catch-block
+  // one.
+  it("prepares a zero-repo manifest, running setup in the workspace root, and still wipes credentials", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    const r = await tr.prepare({ repos: [], setup_commands: ["mise install"] });
+    expect(r).toEqual({ ok: true, status: "booting" });
+    await settle();
+    expect(tr.lifecycle.status().state).toBe("prepared");
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
+    expect(d.deleteCredentialConfig).toHaveBeenCalled();
   });
 });
 
@@ -468,5 +577,47 @@ describe("TaskRun.prepare credential wipe (real filesystem)", () => {
     // renamed or backup copy of the config, say — which neither existsSync would
     // see.
     expect(readdirSync(join(home, ".throng"))).toEqual([]);
+  });
+});
+
+describe("resolveWorkingDirectory", () => {
+  const root = "/home/user/workspace";
+  // Typed rather than cast: if WorkspaceManifest gains a required field this
+  // stops compiling, which is the point. An `as any` here would keep building
+  // against a manifest shape the function no longer receives.
+  const manifest = (repos: RepoSpec[]): WorkspaceManifest => ({
+    repos,
+    credentials: null,
+    github_token: null,
+    setup_commands: [],
+  });
+
+  it("returns the primary repo's destination", () => {
+    const m = manifest([
+      { url: "https://x/a", ref: "main", dest: "a", primary: false },
+      { url: "https://x/b", ref: "main", dest: "b", primary: true },
+    ]);
+    expect(resolveWorkingDirectory(m, root)).toBe("/home/user/workspace/b");
+  });
+
+  it("returns the workspace root when there are no repos", () => {
+    expect(resolveWorkingDirectory(manifest([]), root)).toBe(root);
+  });
+
+  // validateRepos permits a dest with subdirectories — it rejects only absolute
+  // paths, ".." segments and anything resolving to the workspace root itself —
+  // so a nested dest is real input, not a hypothetical.
+  it("joins a nested dest under the workspace root", () => {
+    const m = manifest([{ url: "https://x/a", ref: "main", dest: "team/svc", primary: true }]);
+    expect(resolveWorkingDirectory(m, root)).toBe("/home/user/workspace/team/svc");
+  });
+
+  // Unreachable through the public API — validation demands exactly one primary
+  // for a non-empty list — but the silent failure it prevents is bad: an empty
+  // cwd makes runSetupCommands run in the process's own directory and report
+  // success.
+  it("throws when a non-empty list has no primary", () => {
+    const m = manifest([{ url: "https://x/a", ref: "main", dest: "a", primary: false }]);
+    expect(() => resolveWorkingDirectory(m, root)).toThrow(/no repo was marked primary/);
   });
 });

@@ -21,8 +21,8 @@ export class CodexEngineAdapter
     }
   }
 
-  buildAgentConfig(manifest: Manifest<ResolvedCodexAgent>, primaryDest: string): Required<AgentConfig> {
-    return buildAgentConfig(manifest, primaryDest);
+  buildAgentConfig(manifest: Manifest<ResolvedCodexAgent>, workingDirectory: string): Required<AgentConfig> {
+    return buildAgentConfig(manifest, workingDirectory);
   }
 
   async createA2AServer(config: Required<AgentConfig>): Promise<ServerHandle> {

@@ -187,12 +187,21 @@ function validateWorkspace(input: Record<string, unknown>, errors: FieldError[])
 /** Rules that need every repo at once; run only after the per-field ones pass. */
 function crossFieldRepoErrors(repos: Array<Record<string, unknown>>): FieldError[] {
   const errors: FieldError[] = [];
-  const primaries = repos.filter((r) => r.primary === true).length;
-  if (primaries !== 1) {
-    errors.push({
-      field: "repos[].primary",
-      reason: `exactly one repo must be marked primary: true (got ${primaries})`,
-    });
+  // Skipped for an empty list only, not relaxed. A task may legitimately start
+  // from a bare workspace — an agent asked to create the project picks the
+  // layout itself — and `primary` exists to name the directory the agent runs
+  // in, which with no repos is the workspace root instead (see
+  // resolveWorkingDirectory). One repo is still required to mark itself
+  // primary: the rule is about naming that directory, not about breaking a tie
+  // between several candidates.
+  if (repos.length > 0) {
+    const primaries = repos.filter((r) => r.primary === true).length;
+    if (primaries !== 1) {
+      errors.push({
+        field: "repos[].primary",
+        reason: `exactly one repo must be marked primary: true (got ${primaries})`,
+      });
+    }
   }
   const dests = repos.map((r) => r.dest);
   if (new Set(dests).size !== dests.length) {
@@ -208,10 +217,6 @@ function validateRepos(value: unknown, errors: FieldError[]): void {
   }
   if (!Array.isArray(value)) {
     errors.push({ field: "repos", reason: "must be a list" });
-    return;
-  }
-  if (value.length === 0) {
-    errors.push({ field: "repos", reason: "must contain at least one entry" });
     return;
   }
   value.forEach((repo, i) => {

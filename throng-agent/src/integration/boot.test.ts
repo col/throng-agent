@@ -27,6 +27,7 @@ function fakeDeps(): BootDeps {
     writeCredentialConfig: vi.fn(() => {}),
     deleteCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
+    ensureWorkspace: vi.fn(() => {}),
     workspaceRoot: "/home/user/workspace",
   };
 }
@@ -74,10 +75,15 @@ describe("throng-agent boot routing", () => {
     await settle();
     const state = tr.lifecycle.status().state;
     expect(["setup", "ready", "failed"]).toContain(state);
-    // If it reached "failed", it must be an engine/agent step (real SDK), never a
-    // routing/validation problem.
+    // If it reached "failed", it must be the real SDK's doing — never a step this
+    // test fakes. `not.toBe("boot")` used to stand here and was vacuous: "boot"
+    // is not a value StepError ever carries, so the guard passed for every
+    // failure, including ones the fakes are supposed to make impossible. It hid a
+    // real bug — when BootDeps gained `ensureWorkspace` and this fake was not
+    // updated, every boot died at "cloning" with "not a function" and the test
+    // still reported green. Naming the steps the fakes own is what gives it teeth.
     if (state === "failed") {
-      expect(tr.lifecycle.status().error?.step).not.toBe("boot");
+      expect(["credentials", "cloning", "setup"]).not.toContain(tr.lifecycle.status().error?.step);
     }
   });
 });

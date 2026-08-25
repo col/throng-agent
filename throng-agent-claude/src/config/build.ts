@@ -5,8 +5,9 @@ import type { ResolvedClaudeAgent } from "../manifest/claude-agent.js";
 /**
  * Builds a fully-defaulted a2a-claude config: a Throng base (name + full
  * host isolation + a deterministic bind) overlaid with the manifest's `agent`
- * keys and the primary repo as the working directory. `resolveConfig(undefined,
- * overrides)` applies a2a-claude's own DEFAULTS underneath our overrides.
+ * keys and the caller's working directory — the primary repo, or the workspace
+ * root when the manifest carries no repos. `resolveConfig(undefined, overrides)`
+ * applies a2a-claude's own DEFAULTS underneath our overrides.
  *
  * The `server` block is pinned explicitly (rather than left to a2a-claude's
  * env-var merge) so a container's HOSTNAME/PORT can never perturb the bind —

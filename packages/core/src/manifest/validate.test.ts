@@ -39,14 +39,6 @@ describe("validate (registry routing)", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.errors.some((e) => e.field === "agent.platform")).toBe(true);
   });
-  it("requires exactly one primary repo", () => {
-    const r = validate(
-      { agent: { platform: "test" }, repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: false }] },
-      registry,
-    );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.errors.some((e) => e.field === "repos[].primary")).toBe(true);
-  });
   it("builds a manifest with resolved platform + selected adapter", () => {
     const r = validate(okInput, registry);
     expect(r.ok).toBe(true);
@@ -56,6 +48,53 @@ describe("validate (registry routing)", () => {
       expect(r.adapter).toBe(echo);
       expect("throng_api_token" in r.manifest).toBe(false);
     }
+  });
+});
+
+describe("validate (empty repo list)", () => {
+  it("accepts repos: [] with a valid agent block", () => {
+    const r = validate({ repos: [], agent: { platform: "test", model: "m" } }, registry);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.repos).toEqual([]);
+  });
+
+  // The pair matters, which is why the primary rule is pinned here rather than
+  // among the routing tests where it used to live. Dropping the rule outright
+  // instead of making it conditional would also pass the case above, and would
+  // let a real manifest through with no primary — which resolveWorkingDirectory
+  // has no cwd for. Note this fires for a single-repo list too: `primary` names the
+  // directory the agent runs in, so one repo must still claim it.
+  it("still requires exactly one primary when repos is non-empty", () => {
+    const r = validate(
+      { repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: false }], agent: { platform: "test" } },
+      registry,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field === "repos[].primary")).toBe(true);
+  });
+
+  it("still requires the repos key to be present", () => {
+    const r = validate({ agent: { platform: "test", model: "m" } }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors).toContainEqual({ field: "repos", reason: "is required" });
+  });
+
+  it("still rejects a non-array repos", () => {
+    const r = validate({ repos: {}, agent: { platform: "test", model: "m" } }, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors).toContainEqual({ field: "repos", reason: "must be a list" });
+  });
+
+  it("accepts repos: [] on prepare too", () => {
+    const r = validatePrepare({ repos: [] }, {});
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.repos).toEqual([]);
+  });
+
+  it("still requires the repos key on prepare", () => {
+    const r = validatePrepare({}, {});
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors).toContainEqual({ field: "repos", reason: "is required" });
   });
 });
 
@@ -317,7 +356,10 @@ describe("validatePrepare", () => {
   });
 
   it("applies the same repo rules as initialise", () => {
-    expect(errorsOf({ ...preparePayload, repos: [] }).map((e) => e.field)).toContain("repos");
+    // Direct, not via errorsOf: that helper throws when validation succeeds, and
+    // an empty repo list is now a success on this route just as it is on
+    // initialise. The parity is the point of the assertion.
+    expect(validatePrepare({ ...preparePayload, repos: [] }).ok).toBe(true);
     expect(errorsOf({ repos: preparePayload.repos.map((r) => ({ ...r, primary: false })) }).map((e) => e.field))
       .toContain("repos[].primary");
     expect(errorsOf({ ...preparePayload, repos: [{ ...preparePayload.repos[0], url: "http://x/y" }] })
