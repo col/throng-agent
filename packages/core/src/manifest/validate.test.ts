@@ -51,6 +51,31 @@ describe("validate (registry routing)", () => {
   });
 });
 
+describe("validate (attachments)", () => {
+  it("accepts a manifest with no attachments (defaults to [])", () => {
+    const r = validate(okInput, registry);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.attachments).toEqual([]);
+  });
+
+  it("carries valid attachments through", () => {
+    const input = {
+      ...okInput,
+      attachments: [{ filename: "a.txt", content_type: "text/plain", url: "https://s3/x" }],
+    };
+    const r = validate(input, registry);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.manifest.attachments).toEqual(input.attachments);
+  });
+
+  it("rejects a malformed attachment entry", () => {
+    const input = { ...okInput, attachments: [{ filename: "a.txt" }] };
+    const r = validate(input, registry);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.errors.some((e) => e.field.startsWith("attachments"))).toBe(true);
+  });
+});
+
 describe("validate (empty repo list)", () => {
   it("accepts repos: [] with a valid agent block", () => {
     const r = validate({ repos: [], agent: { platform: "test", model: "m" } }, registry);

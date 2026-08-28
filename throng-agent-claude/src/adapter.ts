@@ -43,8 +43,12 @@ export class ClaudeEngineAdapter
     }
   }
 
-  buildAgentConfig(manifest: Manifest<ResolvedClaudeAgent>, workingDirectory: string): Required<AgentConfig> {
-    return buildAgentConfig(manifest, workingDirectory);
+  buildAgentConfig(
+    manifest: Manifest<ResolvedClaudeAgent>,
+    workingDirectory: string,
+    additionalDirectories?: string[],
+  ): Required<AgentConfig> {
+    return buildAgentConfig(manifest, workingDirectory, additionalDirectories);
   }
 
   async createA2AServer(config: Required<AgentConfig>): Promise<ServerHandle> {

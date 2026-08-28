@@ -7,6 +7,13 @@ export interface RepoSpec {
   primary: boolean;
 }
 
+export interface AttachmentSpec {
+  filename: string;
+  content_type: string;
+  /** Short-lived presigned GET URL the sandbox downloads at boot. */
+  url: string;
+}
+
 /**
  * Where `throng-creds` fetches GitHub tokens from, and the identity it presents
  * when it does.
@@ -55,6 +62,9 @@ export interface WorkspaceManifest {
   /** A literal token. Takes precedence over `credentials` when both are set. */
   github_token: string | null;
   setup_commands: string[];
+  /** Task file attachments, downloaded to a sibling `attachments/` dir at boot.
+   *  Optional on the wire; defaults to [] when absent. */
+  attachments: AttachmentSpec[];
 }
 
 /** Engine-agnostic manifest skeleton owned by core: a workspace plus the commit

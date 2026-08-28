@@ -1,11 +1,16 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { GitResult } from "./bootstrap/git.js";
 import { describeSetupFailure, redactTokens, type SetupResult } from "./bootstrap/setup.js";
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
-import type { FieldError, Manifest, UserIdentity, WorkspaceManifest } from "./manifest/types.js";
+import type { AttachmentSpec, FieldError, Manifest, UserIdentity, WorkspaceManifest } from "./manifest/types.js";
 import { validate, validatePrepare } from "./manifest/validate.js";
+
+/** Name of the directory attachments are downloaded into, a sibling of the
+ *  working directory — so the system-prompt convention `../attachments/<name>`
+ *  resolves correctly regardless of the working directory's own name. */
+const ATTACHMENTS_DIRNAME = "attachments";
 
 /** Engine-agnostic boot dependencies. */
 export interface BootDeps {
@@ -28,6 +33,8 @@ export interface BootDeps {
    *  machine — stays inert. */
   ensureWorkspace: (dir: string) => void;
   workspaceRoot: string;
+  /** Downloads task attachments into `dir` (a sibling of the working directory). */
+  downloadAttachments: (attachments: AttachmentSpec[], dir: string) => Promise<void>;
 }
 
 /** What a control-server route does with an accepted, rejected or duplicate POST. */
@@ -134,9 +141,11 @@ export class TaskRun {
       // second copy of these methods: the shared call path is what keeps a
       // snapshot build and the task boot that restores from it from drifting.
       //
-      // The returned working directory is discarded here on purpose: a prepare
-      // builds a filesystem image and never starts an agent, so nothing after
-      // this point needs to know where one would have run.
+      // The returned working directory and attachments directory are discarded
+      // here on purpose: a prepare builds a filesystem image and never starts an
+      // agent, so nothing after this point needs to know where one would have
+      // run. A `WorkspaceManifest` also carries no attachments, so nothing
+      // downloads on this path regardless.
       this.writeCredentials(manifest, "prepare");
       await this.materialiseWorkspace(manifest, "prepare");
 
@@ -199,14 +208,18 @@ export class TaskRun {
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
       this.writeCredentials(manifest);
-      const workingDirectory = await this.materialiseWorkspace(manifest);
+      const { workingDirectory, attachmentsDir } = await this.materialiseWorkspace(manifest);
 
       log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
       // Commit identity only. GitHub auth is no longer environment-based.
       this.deps.injectGitIdentity(manifest.user_identity);
 
-      const config = adapter.buildAgentConfig(manifest, workingDirectory);
+      // Only granted when something was actually downloaded there — an
+      // attachments-less task must not hand the agent a directory that
+      // doesn't exist.
+      const extraDirs = (manifest.attachments ?? []).length > 0 ? [attachmentsDir] : [];
+      const config = adapter.buildAgentConfig(manifest, workingDirectory, extraDirs);
       log.info("boot step: starting A2A server", { workingDirectory });
       try {
         this.serverHandle = await adapter.createA2AServer(config);
@@ -257,14 +270,43 @@ export class TaskRun {
    *
    * `phase` only labels the logs — a prepare run that never boots an agent must
    * not emit "boot step: cloning repos" at an operator hunting a failure.
+   *
+   * Also resolves and populates the attachments directory, a sibling of the
+   * working directory: `workspaceRoot/<primary-dest>` -> `workspaceRoot/attachments`.
+   * A sibling, not a subdirectory of the working directory, because the working
+   * directory is a git checkout the agent's own commands operate on, and the
+   * system-prompt convention pointing the agent at attachments is the fixed
+   * relative path `../attachments/<name>` — that only resolves correctly if the
+   * two directories are siblings. Downloading happens here, alongside cloning
+   * and setup, for the same reason those live in one method: order is a
+   * correctness property (attachments must exist before the agent that reads
+   * them starts), and this is the one place trusted to keep it. A prepare run
+   * passes no attachments (see `WorkspaceManifest` vs `Manifest`), so the
+   * download is unconditionally skipped there.
    */
-  private async materialiseWorkspace(manifest: WorkspaceManifest, phase: Phase = "boot"): Promise<string> {
+  private async materialiseWorkspace(
+    manifest: WorkspaceManifest,
+    phase: Phase = "boot",
+  ): Promise<{ workingDirectory: string; attachmentsDir: string }> {
     // Resolved before the clone, so a manifest with no primary repo fails having
     // done nothing rather than after pulling every repo over the network.
     const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
+    const attachmentsDir = join(dirname(workingDirectory), ATTACHMENTS_DIRNAME);
     await this.syncRepos(manifest, phase);
     await this.runSetup(manifest, workingDirectory, phase);
-    return workingDirectory;
+
+    const attachments = manifest.attachments ?? [];
+    if (attachments.length > 0) {
+      this.lifecycle.set("setup");
+      log.info(`${phase} step: downloading attachments`, { count: attachments.length, dir: attachmentsDir });
+      try {
+        await this.deps.downloadAttachments(attachments, attachmentsDir);
+      } catch (err) {
+        throw new StepError("attachments", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    return { workingDirectory, attachmentsDir };
   }
 
   /** Clones or resyncs every repo in the manifest. The working directory is

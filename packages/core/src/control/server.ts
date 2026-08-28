@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import { downloadAttachments } from "../bootstrap/attachments.js";
 import { syncOrClone } from "../bootstrap/git.js";
 import { runSetupCommands } from "../bootstrap/setup.js";
 import { injectGitIdentity } from "../bootstrap/git-identity.js";
@@ -101,6 +102,7 @@ export function defaultBootDeps(): BootDeps {
     deleteCredentialConfig: () => deleteCredentialConfig(),
     injectGitIdentity,
     ensureWorkspace: (dir) => mkdirSync(dir, { recursive: true }),
+    downloadAttachments,
     // `||` rather than `??` so a blank WORKSPACE_DIR falls back instead of
     // resolving every clone destination against "".
     workspaceRoot: process.env.WORKSPACE_DIR || join(homeDir(), "workspace"),
