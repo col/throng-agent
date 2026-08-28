@@ -35,8 +35,15 @@ export interface EngineAdapter<TAgent = unknown, TConfig = unknown> {
    *
    *  `workingDirectory` is the primary repo's destination, or the workspace root
    *  when the manifest carries no repos — so it is not necessarily a repository.
-   *  See resolveWorkingDirectory. */
-  buildAgentConfig(manifest: Manifest<TAgent>, workingDirectory: string): TConfig;
+   *  See resolveWorkingDirectory.
+   *
+   *  `additionalDirectories` grants the engine access to directories outside
+   *  `workingDirectory` — today, the sibling `attachments/` dir task-run.ts
+   *  populates at boot when the manifest carries attachments. Optional, and
+   *  defaulted by core to `[]`, so an adapter that has no notion of additional
+   *  directories yet (see the codex adapter) stays a valid implementation of
+   *  this interface unchanged. */
+  buildAgentConfig(manifest: Manifest<TAgent>, workingDirectory: string, additionalDirectories?: string[]): TConfig;
 
   /** Start the engine's A2A server. */
   createA2AServer(config: TConfig): Promise<ServerHandle>;

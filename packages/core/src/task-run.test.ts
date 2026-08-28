@@ -17,6 +17,7 @@ function deps(over: Partial<BootDeps> = {}): BootDeps {
     deleteCredentialConfig: vi.fn(() => {}),
     injectGitIdentity: vi.fn(() => {}),
     ensureWorkspace: vi.fn(() => {}),
+    downloadAttachments: vi.fn(async () => {}),
     workspaceRoot: "/home/user/workspace",
     ...over,
   };
@@ -156,7 +157,7 @@ describe("TaskRun", () => {
     expect(tr.lifecycle.status().state).toBe("ready");
     expect(d.syncOrClone).not.toHaveBeenCalled();
     expect(d.ensureWorkspace).toHaveBeenCalledWith("/home/user/workspace");
-    expect(claude.buildAgentConfig).toHaveBeenCalledWith(expect.anything(), "/home/user/workspace");
+    expect(claude.buildAgentConfig).toHaveBeenCalledWith(expect.anything(), "/home/user/workspace", []);
   });
 
   // Separate from the test above because it pins a different property: not that
@@ -190,6 +191,39 @@ describe("TaskRun", () => {
     expect(tr.lifecycle.status().state).toBe("prepared");
     expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
     expect(d.deleteCredentialConfig).toHaveBeenCalled();
+  });
+
+  it("downloads attachments into a sibling dir and grants the agent access", async () => {
+    const downloadAttachments = vi.fn(async () => {});
+    const claude = adapter();
+    const tr = new TaskRun(deps({ downloadAttachments }), { claude });
+
+    await tr.initialise({
+      ...okPayload,
+      attachments: [{ filename: "a.txt", content_type: "text/plain", url: "https://s3/x" }],
+    });
+    await settle();
+
+    expect(downloadAttachments).toHaveBeenCalledOnce();
+    const [atts, dir] = downloadAttachments.mock.calls[0];
+    expect(atts).toHaveLength(1);
+    // sibling of workingDirectory (workspaceRoot/y -> workspaceRoot/attachments)
+    expect(dir).toBe("/home/user/workspace/attachments");
+
+    // buildAgentConfig received the attachments dir as an additional directory.
+    expect(claude.buildAgentConfig).toHaveBeenCalledWith(
+      expect.anything(),
+      "/home/user/workspace/y",
+      ["/home/user/workspace/attachments"],
+    );
+  });
+
+  it("passes no extra dirs when there are no attachments", async () => {
+    const claude = adapter();
+    const tr = new TaskRun(deps(), { claude });
+    await tr.initialise(okPayload);
+    await settle();
+    expect(claude.buildAgentConfig).toHaveBeenCalledWith(expect.anything(), "/home/user/workspace/y", []);
   });
 });
 
