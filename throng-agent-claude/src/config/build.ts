@@ -20,6 +20,7 @@ import type { ResolvedClaudeAgent } from "../manifest/claude-agent.js";
 export function buildAgentConfig(
   manifest: Manifest<ResolvedClaudeAgent>,
   workingDirectory: string,
+  additionalDirectories: string[] = [],
 ): Required<AgentConfig> {
   const a = manifest.agent.keys;
   const claude: NonNullable<AgentConfig["claude"]> = {
@@ -73,6 +74,7 @@ export function buildAgentConfig(
   if (Array.isArray(a.allowed_tools)) claude.allowedTools = a.allowed_tools as string[];
   if (Array.isArray(a.disallowed_tools)) claude.disallowedTools = a.disallowed_tools as string[];
   if (typeof a.max_turns === "number") claude.maxTurns = a.max_turns;
+  if (additionalDirectories.length > 0) claude.additionalDirectories = additionalDirectories;
 
   // Structured output. Only the outer key is renamed — the schema body is JSON
   // Schema's own vocabulary and is forwarded verbatim. Left unset when absent so

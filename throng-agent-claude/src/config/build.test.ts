@@ -215,4 +215,14 @@ describe("buildAgentConfig", () => {
     const cfg = buildAgentConfig(manifest({}), "/work/app");
     expect(cfg.claude.outputFormat).toBeUndefined();
   });
+
+  it("sets additionalDirectories when attachment dirs are provided", () => {
+    const cfg = buildAgentConfig(manifest({}), "/work/app", ["/work/attachments"]);
+    expect(cfg.claude.additionalDirectories).toEqual(["/work/attachments"]);
+  });
+
+  it("leaves additionalDirectories unset when none are provided", () => {
+    const cfg = buildAgentConfig(manifest({}), "/work/app");
+    expect(cfg.claude.additionalDirectories ?? []).toEqual([]);
+  });
 });
