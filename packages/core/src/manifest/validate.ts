@@ -2,6 +2,7 @@ import type { Env } from "../env.js";
 import type { AdapterRegistry, EngineAdapter } from "../engine/adapter.js";
 import { log } from "../log.js";
 import type {
+  AttachmentSpec,
   BaseManifest,
   CredentialsConfig,
   FieldError,
@@ -182,6 +183,24 @@ function validateWorkspace(input: Record<string, unknown>, errors: FieldError[])
       errors.push({ field: "setup_commands", reason: "each entry must be a non-empty string" });
     }
   }
+
+  if ("attachments" in input) {
+    const list = input.attachments;
+    if (!Array.isArray(list)) {
+      errors.push({ field: "attachments", reason: "must be a list" });
+    } else {
+      list.forEach((a, i) => {
+        if (
+          !isObject(a) ||
+          typeof a.filename !== "string" ||
+          typeof a.content_type !== "string" ||
+          typeof a.url !== "string"
+        ) {
+          errors.push({ field: `attachments[${i}]`, reason: "must be {filename, content_type, url}" });
+        }
+      });
+    }
+  }
 }
 
 /** Rules that need every repo at once; run only after the per-field ones pass. */
@@ -338,6 +357,13 @@ function buildWorkspaceManifest(
     credentials,
     github_token: blankToNil(input.github_token) ?? blankToNil(env.GITHUB_TOKEN),
     setup_commands: (input.setup_commands as string[] | undefined) ?? [],
+    attachments: Array.isArray(input.attachments)
+      ? (input.attachments as AttachmentSpec[]).map((a) => ({
+          filename: a.filename,
+          content_type: a.content_type,
+          url: a.url,
+        }))
+      : [],
   };
 }
 
