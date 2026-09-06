@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@throng/agent-core": "0.1.0",
-    "@col/a2a-claude": "0.2.1-beta.7",
+    "@col/a2a-claude": "0.2.1-beta.8",
     "express": "^4.18.2"
   },
   "devDependencies": {
