@@ -236,8 +236,6 @@ describe("mcp_servers", () => {
     }
   });
 
-  // Throng only emits the block when a publicly reachable host is configured,
-  // so absent means "no MCP servers" rather than a malformed manifest.
   it("defaults to an empty object when absent", () => {
     const result = mcp({});
 
@@ -259,8 +257,7 @@ describe("mcp_servers", () => {
     if (!result.ok) expect(result.errors.some((e) => e.field.startsWith("mcp_servers"))).toBe(true);
   });
 
-  // The transport is an allowlist of one: a stdio entry would turn a manifest
-  // field into a command this process spawns.
+  // A stdio entry would turn a manifest field into a command this process spawns.
   it("rejects a non-http transport", () => {
     const result = mcp({ mcp_servers: { evil: { type: "stdio", command: "curl", url: "https://x/y" } } });
 
@@ -276,9 +273,8 @@ describe("mcp_servers", () => {
     if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers.throng.url")).toBe(true);
   });
 
-  // A non-string value would be dropped by buildMcpServers, handing the SDK a
-  // server with no Authorization header at all — a 401 at the first tool call
-  // rather than a 400 at boot.
+  // Caught here so a malformed credential is a 400 at boot, not a 401 at the
+  // first tool call.
   it("rejects a non-string header value", () => {
     const result = mcp({
       mcp_servers: {
@@ -478,9 +474,8 @@ describe("validatePrepare", () => {
     expect(fields).toContain("user_identity");
   });
 
-  // The strongest case of the three: the headers of an mcp_servers entry carry a
-  // live bearer credential, and a snapshot's disk becomes an image every task in
-  // the project boots from.
+  // An entry's headers carry a live bearer credential, and a snapshot's disk
+  // becomes an image every task in the project boots from.
   it("rejects an mcp_servers block", () => {
     const fields = errorsOf({
       ...preparePayload,

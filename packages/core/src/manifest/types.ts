@@ -68,15 +68,10 @@ export interface WorkspaceManifest {
 }
 
 /**
- * A remote MCP server the agent connects to, as sent by Throng.
- *
- * Only Streamable HTTP is modelled. Throng never sends a `stdio` entry, and
- * accepting one here would make a manifest field into a command the sandbox
- * executes.
- *
- * `headers` carries the bearer credential and is therefore live secret
- * material: it arrives resolved, is handed straight to the SDK, and must never
- * be logged.
+ * A remote MCP server the agent connects to. Only Streamable HTTP is
+ * modelled — a `stdio` entry would turn a manifest field into a command the
+ * sandbox executes. `headers` carries a live bearer credential and must
+ * never be logged.
  */
 export interface McpHttpServer {
   type: "http";
@@ -89,12 +84,11 @@ export interface McpHttpServer {
 export interface BaseManifest extends WorkspaceManifest {
   user_identity: UserIdentity;
   /**
-   * Remote MCP servers. Optional on the wire; defaults to {} when absent —
-   * Throng only emits the block when a publicly reachable host is configured.
+   * Remote MCP servers. Optional on the wire; defaults to {} when absent.
    *
-   * Deliberately on BaseManifest rather than WorkspaceManifest: a snapshot
-   * built by `/api/prepare` is shared by every task in a project, so it may
-   * carry no per-task credential, and the entries here hold one.
+   * On BaseManifest, not WorkspaceManifest: a `/api/prepare` snapshot's disk
+   * becomes an image shared by every task in the project, and an entry here
+   * holds a live bearer credential.
    */
   mcp_servers: Record<string, McpHttpServer>;
 }

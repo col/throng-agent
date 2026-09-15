@@ -115,13 +115,8 @@ export function validatePrepare(input: unknown, env: Env = process.env): Prepare
         "must not be sent to /api/prepare: the commit identity is injected per task by /api/initialise",
     });
   }
-  // The same rule, and the strongest case for it: an mcp_servers entry carries a
-  // live bearer credential in its headers, and a snapshot's disk is captured
-  // into an image every task in the project boots from. WorkspaceManifest has no
-  // field to hold one today, so dropping it would be harmless — but that safety
-  // is a property of a type a later refactor could erase without noticing,
-  // whereas a 400 says out loud that this is an initialise manifest sent to the
-  // wrong route.
+  // Rejected, not ignored: an entry's headers carry a live bearer credential,
+  // and a snapshot's disk becomes an image shared by every task in the project.
   if ("mcp_servers" in input) {
     errors.push({
       field: "mcp_servers",
@@ -321,13 +316,9 @@ function validateUserIdentity(value: unknown, errors: FieldError[]): void {
 }
 
 /**
- * The optional `mcp_servers` block. Absent means the sandbox was booted without
- * a reachable control plane (dev), so an empty map is the correct default
- * rather than an error.
- *
- * Only Streamable HTTP is accepted. Throng never sends a `stdio` entry, and
- * accepting one would turn a manifest field into a command this process spawns
- * — so the transport is an allowlist of exactly one.
+ * The optional `mcp_servers` block; absent defaults to no servers. Only
+ * `type: "http"` is accepted — a `stdio` entry would turn a manifest field
+ * into a command this process spawns.
  */
 function validateMcpServers(value: unknown, errors: FieldError[]): void {
   if (value === undefined) return;
@@ -347,21 +338,15 @@ function validateMcpServers(value: unknown, errors: FieldError[]): void {
     if (urlReason) {
       errors.push({ field: `mcp_servers.${name}.url`, reason: urlReason });
     } else if (!(server.url as string).startsWith("https://") || (server.url as string) === "https://") {
-      // The Authorization header below is a live bearer token, so it is never
-      // appropriate to send in the clear — same rule as credentials.url. A bare
-      // scheme with no host is rejected too, matching what the control plane
-      // already requires of the URL it builds.
+      // headers carries a live bearer token, so plaintext is never acceptable.
       errors.push({ field: `mcp_servers.${name}.url`, reason: "must start with https:// and name a host" });
     }
     if ("headers" in server) {
       if (!isObject(server.headers)) {
         errors.push({ field: `mcp_servers.${name}.headers`, reason: "must be an object" });
       } else {
-        // Values, not just the map. A non-string value is dropped downstream by
-        // buildMcpServers, which would hand the SDK a server with no
-        // Authorization header at all — a 401 at the first tool call instead of
-        // a 400 at boot, which is precisely the failure this validation exists
-        // to prevent.
+        // Checked here so a malformed credential is a 400 at boot, not a 401
+        // at the first tool call.
         for (const [header, v] of Object.entries(server.headers)) {
           if (typeof v !== "string") {
             errors.push({
@@ -375,15 +360,7 @@ function validateMcpServers(value: unknown, errors: FieldError[]): void {
   }
 }
 
-/**
- * Normalised `mcp_servers`, safe to read after validation passed.
- *
- * `headers` is narrowed to string values, which validation has already
- * guaranteed — the filter is what makes that guarantee legible to the type, not
- * a second policy. A half-formed header map must never reach the SDK: it is
- * forwarded verbatim, so a dropped Authorization fails at the first tool call
- * rather than at boot.
- */
+/** Normalises `mcp_servers` after validation, narrowing `headers` to string values. */
 function buildMcpServers(value: unknown): Record<string, McpHttpServer> {
   if (!isObject(value)) return {};
 

@@ -221,28 +221,24 @@ or neither.
 
 ### `mcp_servers`
 
-Optional, and initialise-only. Each entry is a remote MCP server the agent is
-given as a tool source; the key is the server name the engine registers it
-under. `type` must be `"http"` — Streamable HTTP is the only transport accepted,
-because anything else (a `stdio` entry in particular) would turn a manifest field
-into a command this process spawns. `url` must start with `https://`, since
-`headers` carries a live bearer credential and is never appropriate to send in
-the clear.
+Optional, and initialise-only. Each entry is a remote MCP server given to the
+agent as a tool source, keyed by the server name the engine registers it
+under. `type` must be `"http"` — Streamable HTTP is the only transport
+accepted, since a `stdio` entry would turn a manifest field into a command
+this process spawns — and `url` must start with `https://`, since `headers`
+carries a live bearer credential. Header values must be strings, checked at
+validation so a malformed one is a `400` at boot rather than a `401` at the
+first tool call.
 
-The block is absent whenever the caller has no publicly reachable host to point
-at — a local Throng in development, for instance — and absent means "no MCP
-servers", not an error. It reaches the engine as the SDK's own `mcp` config, and
-is attached only when non-empty so the wrapper's default (and its reserved
-`a2a-subagents` key) is never displaced by an empty map.
+Absent means no MCP servers (a local Throng in development has no host to
+point at). The block reaches the engine as the SDK's own `mcp` config and is
+attached only when non-empty, so it never displaces the wrapper's reserved
+`a2a-subagents` key.
 
-Header values must be strings, checked at validation rather than dropped later:
-a forwarded server missing its `Authorization` header fails at the first tool
-call instead of at boot.
-
-Headers arrive already resolved and are handed straight to the SDK. Nothing logs
-them. `/api/prepare` **rejects** the block with a `400`, exactly as it rejects
-`agent` and `user_identity` — a snapshot is shared by every task in a project,
-so it may carry no per-task credential.
+Headers arrive already resolved, are handed straight to the SDK, and are never
+logged. `/api/prepare` **rejects** the block with a `400`, exactly as it
+rejects `agent` and `user_identity`: a snapshot is shared by every task in a
+project, so it may carry no per-task credential.
 
 `repos[].token` is still accepted but ignored. `throng-creds` scopes every
 request to the repo git is talking to, which a static per-repo token cannot.
