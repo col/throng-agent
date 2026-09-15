@@ -7,13 +7,16 @@ import type { ResolvedClaudeAgent } from "../manifest/claude-agent.js";
 const manifest = (
   keys: Record<string, unknown>,
   plugins: ResolvedPlugins = EMPTY_PLUGINS,
+  over: Partial<Manifest<ResolvedClaudeAgent>> = {},
 ): Manifest<ResolvedClaudeAgent> => ({
   repos: [{ url: "https://x/y", ref: "main", dest: "app", primary: true, token: null }],
   github_token: null,
   user_identity: { name: null, email: null },
+  mcp_servers: {},
   setup_commands: [],
   platform: "claude",
   agent: { keys, plugins, auth: null },
+  ...over,
 });
 
 /** Resolves a manifest `agent.plugins` list, failing the test if invalid. */
@@ -224,5 +227,34 @@ describe("buildAgentConfig", () => {
   it("leaves additionalDirectories unset when none are provided", () => {
     const cfg = buildAgentConfig(manifest({}), "/work/app");
     expect(cfg.claude.additionalDirectories ?? []).toEqual([]);
+  });
+});
+
+describe("mcp servers", () => {
+  it("passes the manifest's mcp_servers to AgentConfig.mcp", () => {
+    const m = manifest({}, EMPTY_PLUGINS, {
+      mcp_servers: {
+        throng: {
+          type: "http",
+          url: "https://throng.example/orgs/x/mcp",
+          headers: { Authorization: "Bearer t" },
+        },
+      },
+    });
+
+    const config = buildAgentConfig(m, "/workspace/app");
+
+    // `mcp` is a sibling of `claude` on AgentConfig, not a field inside it.
+    expect(config.mcp?.throng).toEqual({
+      type: "http",
+      url: "https://throng.example/orgs/x/mcp",
+      headers: { Authorization: "Bearer t" },
+    });
+  });
+
+  it("leaves mcp unset when the manifest carries none", () => {
+    const config = buildAgentConfig(manifest({}, EMPTY_PLUGINS, { mcp_servers: {} }), "/workspace/app");
+
+    expect(config.mcp ?? {}).toEqual({});
   });
 });

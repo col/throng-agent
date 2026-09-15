@@ -7,6 +7,7 @@ import type {
   CredentialsConfig,
   FieldError,
   Manifest,
+  McpHttpServer,
   PrepareValidateResult,
   RepoSpec,
   ValidateResult,
@@ -59,6 +60,7 @@ export function validate(
   if (agentResult && !agentResult.ok) errors.push(...agentResult.errors);
 
   validateUserIdentity(input.user_identity, errors);
+  validateMcpServers(input.mcp_servers, errors);
 
   if (errors.length > 0) return { ok: false, errors };
 
@@ -111,6 +113,15 @@ export function validatePrepare(input: unknown, env: Env = process.env): Prepare
       field: "user_identity",
       reason:
         "must not be sent to /api/prepare: the commit identity is injected per task by /api/initialise",
+    });
+  }
+  // Rejected, not ignored: an entry's headers carry a live bearer credential,
+  // and a snapshot's disk becomes an image shared by every task in the project.
+  if ("mcp_servers" in input) {
+    errors.push({
+      field: "mcp_servers",
+      reason:
+        "must not be sent to /api/prepare: a snapshot is shared by every task in the project and carries no MCP credential",
     });
   }
 
@@ -305,6 +316,74 @@ function validateUserIdentity(value: unknown, errors: FieldError[]): void {
 }
 
 /**
+ * The optional `mcp_servers` block; absent defaults to no servers. Only
+ * `type: "http"` is accepted — a `stdio` entry would turn a manifest field
+ * into a command this process spawns.
+ */
+function validateMcpServers(value: unknown, errors: FieldError[]): void {
+  if (value === undefined) return;
+  if (!isObject(value)) {
+    errors.push({ field: "mcp_servers", reason: "must be an object" });
+    return;
+  }
+  for (const [name, server] of Object.entries(value)) {
+    if (!isObject(server)) {
+      errors.push({ field: `mcp_servers.${name}`, reason: "must be an object" });
+      continue;
+    }
+    if (server.type !== "http") {
+      errors.push({ field: `mcp_servers.${name}.type`, reason: 'must be "http"' });
+    }
+    const urlReason = nonEmptyString(server.url);
+    if (urlReason) {
+      errors.push({ field: `mcp_servers.${name}.url`, reason: urlReason });
+    } else if (!(server.url as string).startsWith("https://") || (server.url as string) === "https://") {
+      // headers carries a live bearer token, so plaintext is never acceptable.
+      errors.push({ field: `mcp_servers.${name}.url`, reason: "must start with https:// and name a host" });
+    }
+    if ("headers" in server) {
+      if (!isObject(server.headers)) {
+        errors.push({ field: `mcp_servers.${name}.headers`, reason: "must be an object" });
+      } else {
+        // Checked here so a malformed credential is a 400 at boot, not a 401
+        // at the first tool call.
+        for (const [header, v] of Object.entries(server.headers)) {
+          if (typeof v !== "string") {
+            errors.push({
+              field: `mcp_servers.${name}.headers.${header}`,
+              reason: "must be a string",
+            });
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Normalises `mcp_servers` after validation, narrowing `headers` to string values. */
+function buildMcpServers(value: unknown): Record<string, McpHttpServer> {
+  if (!isObject(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value).map(([name, server]) => {
+      const s = server as Record<string, unknown>;
+      const headers = isObject(s.headers)
+        ? (Object.fromEntries(
+            Object.entries(s.headers).filter(([, v]) => typeof v === "string"),
+          ) as Record<string, string>)
+        : undefined;
+
+      return [
+        name,
+        headers
+          ? { type: "http" as const, url: s.url as string, headers }
+          : { type: "http" as const, url: s.url as string },
+      ];
+    }),
+  );
+}
+
+/**
  * The optional `credentials` block. Omitted entirely in standalone mode, where a
  * literal `github_token` is used instead. Both fields are required when the
  * block is present — a half-configured helper would fail at the first clone
@@ -380,6 +459,7 @@ function buildManifest(
   const base: BaseManifest = {
     ...buildWorkspaceManifest(input, repos, env),
     user_identity: { name: blankToNil(identity.name), email: blankToNil(identity.email) },
+    mcp_servers: buildMcpServers(input.mcp_servers),
   };
   return { ...base, platform, agent };
 }

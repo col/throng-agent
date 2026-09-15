@@ -37,6 +37,13 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
     "name": "Throng Bot",
     "email": "bot@throng.dev"
   },
+  "mcp_servers": {                    // optional — remote MCP servers the agent may call
+    "throng": {
+      "type": "http",                 // Streamable HTTP is the only transport accepted
+      "url": "https://control-plane.example/orgs/<uuid>/mcp",
+      "headers": { "Authorization": "Bearer …" }
+    }
+  },
   "agent": {
     "platform": "claude",      // required — selects the engine adapter (claude | codex)
     "auth": {                  // the one credential; see below
@@ -212,6 +219,27 @@ Credentials and identity are independent: a commit identity is a git concept,
 unrelated to which token pushes the work, so a manifest may carry either, both,
 or neither.
 
+### `mcp_servers`
+
+Optional, and initialise-only. Each entry is a remote MCP server given to the
+agent as a tool source, keyed by the server name the engine registers it
+under. `type` must be `"http"` — Streamable HTTP is the only transport
+accepted, since a `stdio` entry would turn a manifest field into a command
+this process spawns — and `url` must start with `https://`, since `headers`
+carries a live bearer credential. Header values must be strings, checked at
+validation so a malformed one is a `400` at boot rather than a `401` at the
+first tool call.
+
+Absent means no MCP servers (a local Throng in development has no host to
+point at). The block reaches the engine as the SDK's own `mcp` config and is
+attached only when non-empty, so it never displaces the wrapper's reserved
+`a2a-subagents` key.
+
+Headers arrive already resolved, are handed straight to the SDK, and are never
+logged. `/api/prepare` **rejects** the block with a `400`, exactly as it
+rejects `agent` and `user_identity`: a snapshot is shared by every task in a
+project, so it may carry no per-task credential.
+
 `repos[].token` is still accepted but ignored. `throng-creds` scopes every
 request to the repo git is talking to, which a static per-repo token cannot.
 
@@ -304,8 +332,8 @@ its repositories, toolchains and dependency caches already on disk.
 ```
 
 It takes the workspace half of the initialise manifest — `repos`,
-`setup_commands`, and `credentials` or `github_token` — and **rejects** `agent`
-and `user_identity` with a `400`. A snapshot is shared by every task in the
+`setup_commands`, and `credentials` or `github_token` — and **rejects** `agent`,
+`user_identity` and `mcp_servers` with a `400`. A snapshot is shared by every task in the
 project and is stored by the sandbox provider, so no agent configuration, no LLM
 credential and no commit identity may be baked into one; a manifest carrying them
 is an initialise manifest sent to the wrong route.

@@ -26,6 +26,7 @@ export type {
   PrepareValidateResult,
   UserIdentity,
   CredentialsConfig,
+  McpHttpServer,
 } from "./manifest/types.js";
 export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export { homeDir, type Env } from "./env.js";

@@ -67,10 +67,30 @@ export interface WorkspaceManifest {
   attachments: AttachmentSpec[];
 }
 
+/**
+ * A remote MCP server the agent connects to. Only Streamable HTTP is
+ * modelled — a `stdio` entry would turn a manifest field into a command the
+ * sandbox executes. `headers` carries a live bearer credential and must
+ * never be logged.
+ */
+export interface McpHttpServer {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+}
+
 /** Engine-agnostic manifest skeleton owned by core: a workspace plus the commit
  *  identity the task's work is attributed to. */
 export interface BaseManifest extends WorkspaceManifest {
   user_identity: UserIdentity;
+  /**
+   * Remote MCP servers. Optional on the wire; defaults to {} when absent.
+   *
+   * On BaseManifest, not WorkspaceManifest: a `/api/prepare` snapshot's disk
+   * becomes an image shared by every task in the project, and an entry here
+   * holds a live bearer credential.
+   */
+  mcp_servers: Record<string, McpHttpServer>;
 }
 
 /**

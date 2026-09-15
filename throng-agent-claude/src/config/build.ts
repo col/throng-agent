@@ -110,5 +110,13 @@ export function buildAgentConfig(
     timeouts: { prompt: 0 },
   };
 
+  // `mcp` is a sibling of `claude` on AgentConfig, not a field inside it.
+  // `headers` holds a live bearer token and must never be logged. Attached
+  // only when non-empty so an empty map never displaces a2a-claude's reserved
+  // "a2a-subagents" key.
+  if (Object.keys(manifest.mcp_servers).length > 0) {
+    overrides.mcp = manifest.mcp_servers;
+  }
+
   return resolveConfig(undefined, overrides);
 }
