@@ -235,10 +235,14 @@ servers", not an error. It reaches the engine as the SDK's own `mcp` config, and
 is attached only when non-empty so the wrapper's default (and its reserved
 `a2a-subagents` key) is never displaced by an empty map.
 
+Header values must be strings, checked at validation rather than dropped later:
+a forwarded server missing its `Authorization` header fails at the first tool
+call instead of at boot.
+
 Headers arrive already resolved and are handed straight to the SDK. Nothing logs
-them. The prepare manifest has no `mcp_servers` field at all — a snapshot is
-shared by every task in a project, so it may hold no per-task credential — so a
-block sent to `/api/prepare` is dropped rather than baked into the image.
+them. `/api/prepare` **rejects** the block with a `400`, exactly as it rejects
+`agent` and `user_identity` — a snapshot is shared by every task in a project,
+so it may carry no per-task credential.
 
 `repos[].token` is still accepted but ignored. `throng-creds` scopes every
 request to the repo git is talking to, which a static per-repo token cannot.
@@ -332,8 +336,8 @@ its repositories, toolchains and dependency caches already on disk.
 ```
 
 It takes the workspace half of the initialise manifest — `repos`,
-`setup_commands`, and `credentials` or `github_token` — and **rejects** `agent`
-and `user_identity` with a `400`. A snapshot is shared by every task in the
+`setup_commands`, and `credentials` or `github_token` — and **rejects** `agent`,
+`user_identity` and `mcp_servers` with a `400`. A snapshot is shared by every task in the
 project and is stored by the sandbox provider, so no agent configuration, no LLM
 credential and no commit identity may be baked into one; a manifest carrying them
 is an initialise manifest sent to the wrong route.

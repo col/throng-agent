@@ -114,7 +114,7 @@ export function buildAgentConfig(
   // token, so it is forwarded and never logged. Attached only when non-empty so
   // the wrapper's own default (no servers) holds otherwise, and so a2a-claude's
   // reserved "a2a-subagents" key is never displaced by an empty map.
-  if (Object.keys(manifest.mcp_servers ?? {}).length > 0) {
+  if (Object.keys(manifest.mcp_servers).length > 0) {
     overrides.mcp = manifest.mcp_servers;
   }
 

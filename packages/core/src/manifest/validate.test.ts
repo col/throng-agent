@@ -276,6 +276,31 @@ describe("mcp_servers", () => {
     if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers.throng.url")).toBe(true);
   });
 
+  // A non-string value would be dropped by buildMcpServers, handing the SDK a
+  // server with no Authorization header at all — a 401 at the first tool call
+  // rather than a 400 at boot.
+  it("rejects a non-string header value", () => {
+    const result = mcp({
+      mcp_servers: {
+        throng: { type: "http", url: "https://throng.example/mcp", headers: { Authorization: 123 } },
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.field === "mcp_servers.throng.headers.Authorization")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("rejects a bare scheme with no host", () => {
+    const result = mcp({ mcp_servers: { throng: { type: "http", url: "https://" } } });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers.throng.url")).toBe(true);
+  });
+
   it("rejects non-object headers", () => {
     const result = mcp({
       mcp_servers: { throng: { type: "http", url: "https://throng.example/mcp", headers: "Bearer t" } },
@@ -451,6 +476,29 @@ describe("validatePrepare", () => {
       (e) => e.field,
     );
     expect(fields).toContain("user_identity");
+  });
+
+  // The strongest case of the three: the headers of an mcp_servers entry carry a
+  // live bearer credential, and a snapshot's disk becomes an image every task in
+  // the project boots from.
+  it("rejects an mcp_servers block", () => {
+    const fields = errorsOf({
+      ...preparePayload,
+      mcp_servers: {
+        throng: {
+          type: "http",
+          url: "https://throng.example/orgs/x/mcp",
+          headers: { Authorization: "Bearer t" },
+        },
+      },
+    }).map((e) => e.field);
+    expect(fields).toContain("mcp_servers");
+  });
+
+  it("rejects an explicitly null mcp_servers block", () => {
+    expect(errorsOf({ ...preparePayload, mcp_servers: null }).map((e) => e.field)).toContain(
+      "mcp_servers",
+    );
   });
 
   // Both, not just the first. These are two independent pushes onto one error
