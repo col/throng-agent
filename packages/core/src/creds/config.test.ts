@@ -30,6 +30,7 @@ function manifest(over: Partial<BaseManifest> = {}): BaseManifest {
     credentials: null,
     github_token: null,
     user_identity: { name: null, email: null },
+    mcp_servers: {},
     setup_commands: [],
     ...over,
   };

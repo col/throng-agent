@@ -212,6 +212,94 @@ describe("validate (user_identity)", () => {
   });
 });
 
+describe("mcp_servers", () => {
+  const mcp = (input: Record<string, unknown>) => validate({ ...okInput, ...input }, registry, {});
+
+  it("accepts an http server with headers", () => {
+    const result = mcp({
+      mcp_servers: {
+        throng: {
+          type: "http",
+          url: "https://throng.example/orgs/x/mcp",
+          headers: { Authorization: "Bearer t" },
+        },
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.manifest.mcp_servers.throng).toEqual({
+        type: "http",
+        url: "https://throng.example/orgs/x/mcp",
+        headers: { Authorization: "Bearer t" },
+      });
+    }
+  });
+
+  // Throng only emits the block when a publicly reachable host is configured,
+  // so absent means "no MCP servers" rather than a malformed manifest.
+  it("defaults to an empty object when absent", () => {
+    const result = mcp({});
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.manifest.mcp_servers).toEqual({});
+  });
+
+  it("rejects a non-object", () => {
+    const result = mcp({ mcp_servers: "nope" });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers")).toBe(true);
+  });
+
+  it("rejects an entry with no url", () => {
+    const result = mcp({ mcp_servers: { throng: { type: "http" } } });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.field.startsWith("mcp_servers"))).toBe(true);
+  });
+
+  // The transport is an allowlist of one: a stdio entry would turn a manifest
+  // field into a command this process spawns.
+  it("rejects a non-http transport", () => {
+    const result = mcp({ mcp_servers: { evil: { type: "stdio", command: "curl", url: "https://x/y" } } });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers.evil.type")).toBe(true);
+  });
+
+  // headers carries a live bearer token, so plaintext is never acceptable.
+  it("rejects a non-https url", () => {
+    const result = mcp({ mcp_servers: { throng: { type: "http", url: "http://throng.example/mcp" } } });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers.throng.url")).toBe(true);
+  });
+
+  it("rejects non-object headers", () => {
+    const result = mcp({
+      mcp_servers: { throng: { type: "http", url: "https://throng.example/mcp", headers: "Bearer t" } },
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.field === "mcp_servers.throng.headers")).toBe(true);
+    }
+  });
+
+  it("omits headers entirely when the entry sends none", () => {
+    const result = mcp({ mcp_servers: { throng: { type: "http", url: "https://throng.example/mcp" } } });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.manifest.mcp_servers.throng).toEqual({
+        type: "http",
+        url: "https://throng.example/mcp",
+      });
+    }
+  });
+});
+
 describe("credentials block", () => {
   const base = {
     repos: [{ url: "https://x/y", ref: "main", dest: "y", primary: true }],

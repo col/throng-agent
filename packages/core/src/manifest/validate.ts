@@ -7,6 +7,7 @@ import type {
   CredentialsConfig,
   FieldError,
   Manifest,
+  McpHttpServer,
   PrepareValidateResult,
   RepoSpec,
   ValidateResult,
@@ -59,6 +60,7 @@ export function validate(
   if (agentResult && !agentResult.ok) errors.push(...agentResult.errors);
 
   validateUserIdentity(input.user_identity, errors);
+  validateMcpServers(input.mcp_servers, errors);
 
   if (errors.length > 0) return { ok: false, errors };
 
@@ -305,6 +307,72 @@ function validateUserIdentity(value: unknown, errors: FieldError[]): void {
 }
 
 /**
+ * The optional `mcp_servers` block. Absent means the sandbox was booted without
+ * a reachable control plane (dev), so an empty map is the correct default
+ * rather than an error.
+ *
+ * Only Streamable HTTP is accepted. Throng never sends a `stdio` entry, and
+ * accepting one would turn a manifest field into a command this process spawns
+ * — so the transport is an allowlist of exactly one.
+ */
+function validateMcpServers(value: unknown, errors: FieldError[]): void {
+  if (value === undefined) return;
+  if (!isObject(value)) {
+    errors.push({ field: "mcp_servers", reason: "must be an object" });
+    return;
+  }
+  for (const [name, server] of Object.entries(value)) {
+    if (!isObject(server)) {
+      errors.push({ field: `mcp_servers.${name}`, reason: "must be an object" });
+      continue;
+    }
+    if (server.type !== "http") {
+      errors.push({ field: `mcp_servers.${name}.type`, reason: 'must be "http"' });
+    }
+    const urlReason = nonEmptyString(server.url);
+    if (urlReason) {
+      errors.push({ field: `mcp_servers.${name}.url`, reason: urlReason });
+    } else if (!(server.url as string).startsWith("https://")) {
+      // The Authorization header below is a live bearer token, so it is never
+      // appropriate to send in the clear — same rule as credentials.url.
+      errors.push({ field: `mcp_servers.${name}.url`, reason: "must start with https://" });
+    }
+    if ("headers" in server && !isObject(server.headers)) {
+      errors.push({ field: `mcp_servers.${name}.headers`, reason: "must be an object" });
+    }
+  }
+}
+
+/**
+ * Normalised `mcp_servers`, safe to read after validation passed.
+ *
+ * `headers` is dropped when it is not an object of strings rather than being
+ * forwarded half-formed: it is handed straight to the SDK, and a malformed
+ * header map fails at the first tool call rather than at boot.
+ */
+function buildMcpServers(value: unknown): Record<string, McpHttpServer> {
+  if (!isObject(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value).map(([name, server]) => {
+      const s = server as Record<string, unknown>;
+      const headers = isObject(s.headers)
+        ? (Object.fromEntries(
+            Object.entries(s.headers).filter(([, v]) => typeof v === "string"),
+          ) as Record<string, string>)
+        : undefined;
+
+      return [
+        name,
+        headers
+          ? { type: "http" as const, url: s.url as string, headers }
+          : { type: "http" as const, url: s.url as string },
+      ];
+    }),
+  );
+}
+
+/**
  * The optional `credentials` block. Omitted entirely in standalone mode, where a
  * literal `github_token` is used instead. Both fields are required when the
  * block is present — a half-configured helper would fail at the first clone
@@ -380,6 +448,7 @@ function buildManifest(
   const base: BaseManifest = {
     ...buildWorkspaceManifest(input, repos, env),
     user_identity: { name: blankToNil(identity.name), email: blankToNil(identity.email) },
+    mcp_servers: buildMcpServers(input.mcp_servers),
   };
   return { ...base, platform, agent };
 }

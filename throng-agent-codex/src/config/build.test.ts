@@ -3,13 +3,18 @@ import type { Manifest } from "@throng/agent-core";
 import { buildAgentConfig } from "./build.js";
 import type { ResolvedCodexAgent } from "../manifest/codex-agent.js";
 
-const manifest = (keys: Record<string, unknown>): Manifest<ResolvedCodexAgent> => ({
+const manifest = (
+  keys: Record<string, unknown>,
+  over: Partial<Manifest<ResolvedCodexAgent>> = {},
+): Manifest<ResolvedCodexAgent> => ({
   repos: [{ url: "https://x/y", ref: "main", dest: "app", primary: true, token: null }],
   github_token: null,
   user_identity: { name: null, email: null },
+  mcp_servers: {},
   setup_commands: [],
   platform: "codex",
   agent: { keys, auth: null },
+  ...over,
 });
 
 describe("buildAgentConfig", () => {
@@ -75,5 +80,37 @@ describe("buildAgentConfig", () => {
       if (prev === undefined) delete process.env.ADVERTISE_PROTOCOL;
       else process.env.ADVERTISE_PROTOCOL = prev;
     }
+  });
+});
+
+describe("mcp servers", () => {
+  it("passes the manifest's mcp_servers to AgentConfig.mcp", () => {
+    const m = manifest(
+      {},
+      {
+        mcp_servers: {
+          throng: {
+            type: "http",
+            url: "https://throng.example/orgs/x/mcp",
+            headers: { Authorization: "Bearer t" },
+          },
+        },
+      },
+    );
+
+    const config = buildAgentConfig(m, "/workspace/app");
+
+    // `mcp` is a sibling of `codex` on AgentConfig, not a field inside it.
+    expect(config.mcp?.throng).toEqual({
+      type: "http",
+      url: "https://throng.example/orgs/x/mcp",
+      headers: { Authorization: "Bearer t" },
+    });
+  });
+
+  it("leaves mcp unset when the manifest carries none", () => {
+    const config = buildAgentConfig(manifest({}, { mcp_servers: {} }), "/workspace/app");
+
+    expect(config.mcp ?? {}).toEqual({});
   });
 });
