@@ -36,6 +36,17 @@ describe("buildAgentConfig", () => {
     expect(cfg.claude.permissionMode).toBe("acceptEdits");
   });
 
+  // A2A v1.0 rejects a card with an empty skills array.
+  it("declares a software-development skill on the agent card", () => {
+    const cfg = buildAgentConfig(manifest({}), "/work/app");
+    expect(cfg.agentCard.skills).toHaveLength(1);
+    const [skill] = cfg.agentCard.skills!;
+    expect(skill.id).toBe("software-development");
+    expect(skill.name).toBeTruthy();
+    expect(skill.description).toBeTruthy();
+    expect(skill.tags!.length).toBeGreaterThan(0);
+  });
+
   // Throng agent turns routinely run past the wrapper's ten-minute default, and
   // a truncated turn is worse than a slow one. 0 disables the bound outright.
   it("disables the wrapper's prompt timeout", () => {
