@@ -21,7 +21,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@col/a2a-claude": "^0.4.1-col.202610010617.4399f52",
+    "@col/a2a-claude": "^0.4.1-col.202610020203.d203f02",
     "@throng/agent-core": "0.1.0",
     "express": "^4.18.2"
   },
