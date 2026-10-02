@@ -24,6 +24,17 @@ describe("buildAgentConfig", () => {
     expect(cfg.codex.workingDirectory).toBe("/work/app");
   });
 
+  // A2A v1.0 rejects a card with an empty skills array.
+  it("declares a software-development skill on the agent card", () => {
+    const cfg = buildAgentConfig(manifest({}), "/work/app");
+    expect(cfg.agentCard.skills).toHaveLength(1);
+    const [skill] = cfg.agentCard.skills!;
+    expect(skill.id).toBe("software-development");
+    expect(skill.name).toBeTruthy();
+    expect(skill.description).toBeTruthy();
+    expect(skill.tags!.length).toBeGreaterThan(0);
+  });
+
   it("maps known agent keys onto the codex block", () => {
     const cfg = buildAgentConfig(
       manifest({

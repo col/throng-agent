@@ -48,6 +48,18 @@ export function buildAgentConfig(
     agentCard: {
       name: "Throng Agent A2A Codex",
       description: "Throng-controlled, Codex-backed A2A agent.",
+      // A2A v1.0 requires at least one skill on the card, and a2a-codex
+      // defaults to none. This agent's job is code generation, so it declares
+      // one general software-development skill.
+      skills: [
+        {
+          id: "software-development",
+          name: "Software Development",
+          description:
+            "Writes, modifies, debugs, tests and refactors code in the workspace's repositories, and commits the results.",
+          tags: ["code", "software-development", "debugging", "testing", "refactoring"],
+        },
+      ],
     },
     server: {
       hostname: "0.0.0.0",
