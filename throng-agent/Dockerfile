@@ -22,7 +22,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates git build-essential gpg wget curl jq \
       autoconf m4 libncurses-dev libssl-dev automake \
-      libxml2-utils ca-certificates inotify-tools \
+      libxml2-utils ca-certificates inotify-tools rsync \
  && install -dm 755 /etc/apt/keyrings \
  && wget -qO - https://mise.jdx.dev/gpg-key.pub \
       | gpg --dearmor -o /etc/apt/keyrings/mise-archive-keyring.gpg \
