@@ -265,16 +265,19 @@ Nothing is configured on the engine's side; it just sees a loopback server.
 The credentials endpoint contract: the proxy POSTs to `credentials_url` with
 `Authorization: Bearer <credentials.token>` and a JSON body of
 `{ "server": "<name>", "server_id": "<id>", "url": "<upstream url>" }`. A `200`
-answers `{ "headers": { … }, "expires_at": "<ISO 8601>" }`. Failures answer
+answers `{ "headers": { … }, "expires_at": "<ISO 8601>" }`. Throng always sets
+`expires_at`, never more than 300 seconds from now. Failures answer
 `{ "message": "…" }` with `400`, `403`, `409` or `503`; the proxy surfaces them to
 the engine as a JSON-RPC error carrying the `message` (so it must be safe for
 the model to read); header values are never logged.
 
-The proxy caches a credential until shortly before `expires_at` and re-checks
-at least every few minutes regardless, so a revoked server stops working
+The proxy caches a credential until shortly before `expires_at`, and
+re-checks at least every 300 seconds, so a revoked server stops working
 promptly. A `401` from the upstream triggers one refetch and one retry of the
 request before the error reaches the engine. A proxy that cannot start fails
-the boot at step `mcp`. `/api/prepare` rejects `mcp_servers`, `proxy` included. `/api/prepare` **rejects** the block with a `400`, exactly as it
+the boot at step `mcp`.
+
+`/api/prepare` **rejects** `mcp_servers`, `proxy` entries included, with a `400`, exactly as it
 rejects `agent` and `user_identity`: a snapshot is shared by every task in a
 project, so it may carry no per-task credential.
 

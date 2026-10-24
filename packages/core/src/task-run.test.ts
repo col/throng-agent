@@ -147,6 +147,8 @@ describe("TaskRun", () => {
       const status = tr.lifecycle.status();
       expect(status.state).toBe("failed");
       expect(status.error?.step).toBe("mcp");
+      expect(status.error?.message).toBe("failed to start the MCP proxy");
+      expect(status.error?.message).not.toContain("EADDRINUSE");
       expect(claude.createA2AServer).not.toHaveBeenCalled();
     });
 

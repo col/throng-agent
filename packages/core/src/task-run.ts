@@ -425,8 +425,11 @@ export class TaskRun {
   }
 
   async shutdown(): Promise<void> {
-    await this.serverHandle?.shutdown();
-    await this.closeMcpProxy();
+    try {
+      await this.serverHandle?.shutdown();
+    } finally {
+      await this.closeMcpProxy();
+    }
   }
 }
 
