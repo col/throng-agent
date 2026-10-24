@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { deleteCredentialConfig, writeCredentialConfig } from "./creds/config.js";
 import { TaskRun, resolveWorkingDirectory, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
-import type { RepoSpec, WorkspaceManifest } from "./manifest/types.js";
+import type { McpHttpServer, RepoSpec, WorkspaceManifest } from "./manifest/types.js";
+import type { McpProxyHandle } from "./mcp-proxy/index.js";
 
 const handle: ServerHandle = { shutdown: vi.fn(async () => {}) };
 
@@ -84,6 +85,84 @@ describe("TaskRun", () => {
     await tr.initialise(okPayload);
     await settle();
     expect(tr.lifecycle.status().error?.step).toBe("plugins");
+  });
+
+  describe("mcp proxy", () => {
+    const proxied: Record<string, McpHttpServer> = {
+      linear: { type: "http", url: "https://mcp.linear.app/mcp", proxy: { server_id: "srv-1", credentials_url: "https://control-plane.example/mcp-creds" } },
+      plain: { type: "http", url: "https://example.com/mcp", headers: { Authorization: "Bearer x" } },
+    };
+    const credentials = { url: "https://control-plane.example/creds", token: "tok" };
+    const engineServers: Record<string, McpHttpServer> = {
+      linear: { type: "http", url: "http://127.0.0.1:4555/mcp/linear" },
+      plain: proxied.plain!,
+    };
+
+    function proxyStub() {
+      const close = vi.fn(async () => {});
+      const start = vi.fn(async (): Promise<McpProxyHandle> => ({ engineServers, close }));
+      return { start, close };
+    }
+
+    it("boot passes loopback urls to buildAgentConfig for proxied entries", async () => {
+      const { start } = proxyStub();
+      const claude = adapter();
+      const tr = new TaskRun(deps({ startMcpProxy: start }), { claude });
+      await tr.initialise({ ...okPayload, credentials, mcp_servers: proxied });
+      await settle();
+      expect(tr.lifecycle.status().state).toBe("ready");
+      expect(start).toHaveBeenCalledWith(proxied, credentials);
+      const passed = (claude.buildAgentConfig as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+      expect(passed.mcp_servers).toEqual(engineServers);
+    });
+
+    it("boot leaves manifest untouched when no entry is proxied", async () => {
+      const { start } = proxyStub();
+      const claude = adapter();
+      const tr = new TaskRun(deps({ startMcpProxy: start }), { claude });
+      await tr.initialise({ ...okPayload, mcp_servers: { plain: proxied.plain } });
+      await settle();
+      expect(start).not.toHaveBeenCalled();
+      const passed = (claude.buildAgentConfig as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+      expect(passed.mcp_servers).toEqual({ plain: proxied.plain });
+    });
+
+    it("shutdown closes the proxy", async () => {
+      const { start, close } = proxyStub();
+      const tr = new TaskRun(deps({ startMcpProxy: start }), { claude: adapter() });
+      await tr.initialise({ ...okPayload, credentials, mcp_servers: proxied });
+      await settle();
+      await tr.shutdown();
+      expect(close).toHaveBeenCalledOnce();
+    });
+
+    it("fails the boot at the mcp step when the proxy cannot start", async () => {
+      const start = vi.fn(async () => {
+        throw new Error("listen EADDRINUSE");
+      });
+      const claude = adapter();
+      const tr = new TaskRun(deps({ startMcpProxy: start }), { claude });
+      await tr.initialise({ ...okPayload, credentials, mcp_servers: proxied });
+      await settle();
+      const status = tr.lifecycle.status();
+      expect(status.state).toBe("failed");
+      expect(status.error?.step).toBe("mcp");
+      expect(claude.createA2AServer).not.toHaveBeenCalled();
+    });
+
+    it("closes the proxy when the agent server fails to start", async () => {
+      const { start, close } = proxyStub();
+      const claude = adapter({
+        createA2AServer: async () => {
+          throw new Error("boom");
+        },
+      });
+      const tr = new TaskRun(deps({ startMcpProxy: start }), { claude });
+      await tr.initialise({ ...okPayload, credentials, mcp_servers: proxied });
+      await settle();
+      expect(tr.lifecycle.status().state).toBe("failed");
+      expect(close).toHaveBeenCalledOnce();
+    });
   });
 
   it("ensures the workspace root exists before cloning", async () => {

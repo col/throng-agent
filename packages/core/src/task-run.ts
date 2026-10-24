@@ -4,6 +4,7 @@ import { describeSetupFailure, redactTokens, type SetupResult } from "./bootstra
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
+import { startMcpProxy, type McpProxyHandle } from "./mcp-proxy/index.js";
 import type { AttachmentSpec, FieldError, Manifest, UserIdentity, WorkspaceManifest } from "./manifest/types.js";
 import { validate, validatePrepare } from "./manifest/validate.js";
 
@@ -35,6 +36,9 @@ export interface BootDeps {
   workspaceRoot: string;
   /** Downloads task attachments into `dir` (a sibling of the working directory). */
   downloadAttachments: (attachments: AttachmentSpec[], dir: string) => Promise<void>;
+  /** Starts the loopback proxy for `mcp_servers` entries carrying a `proxy`
+   *  block. Defaults to the real one; injected so tests never bind a port. */
+  startMcpProxy?: typeof startMcpProxy;
 }
 
 /** What a control-server route does with an accepted, rejected or duplicate POST. */
@@ -56,6 +60,7 @@ type Phase = "boot" | "prepare";
 export class TaskRun {
   readonly lifecycle = new Lifecycle();
   private serverHandle?: ServerHandle;
+  private mcpProxy?: McpProxyHandle;
 
   constructor(
     private readonly deps: BootDeps,
@@ -219,7 +224,8 @@ export class TaskRun {
       // attachments-less task must not hand the agent a directory that
       // doesn't exist.
       const extraDirs = (manifest.attachments ?? []).length > 0 ? [attachmentsDir] : [];
-      const config = adapter.buildAgentConfig(manifest, workingDirectory, extraDirs);
+      const engineManifest = await this.startMcpProxy(manifest);
+      const config = adapter.buildAgentConfig(engineManifest, workingDirectory, extraDirs);
       log.info("boot step: starting A2A server", { workingDirectory });
       try {
         this.serverHandle = await adapter.createA2AServer(config);
@@ -231,7 +237,38 @@ export class TaskRun {
       this.lifecycle.set("ready");
       log.info("boot complete; agent is ready");
     } catch (err) {
+      await this.closeMcpProxy();
       this.reportFailure(err);
+    }
+  }
+
+  /**
+   * Proxied `mcp_servers` entries hold no credential, so the engine is pointed
+   * at a loopback proxy that fetches one per request. Returns the manifest the
+   * engine should see; unchanged when nothing is proxied. The message is static
+   * because it reaches `error_message` and the cause could carry a header value.
+   */
+  private async startMcpProxy(manifest: Manifest): Promise<Manifest> {
+    const servers = manifest.mcp_servers ?? {};
+    if (!Object.values(servers).some((s) => s.proxy !== undefined)) return manifest;
+
+    log.info("boot step: starting MCP proxy");
+    try {
+      const start = this.deps.startMcpProxy ?? startMcpProxy;
+      this.mcpProxy = await start(servers, manifest.credentials);
+    } catch {
+      throw new StepError("mcp", "failed to start the MCP proxy");
+    }
+    return { ...manifest, mcp_servers: this.mcpProxy.engineServers };
+  }
+
+  private async closeMcpProxy(): Promise<void> {
+    const proxy = this.mcpProxy;
+    this.mcpProxy = undefined;
+    try {
+      await proxy?.close();
+    } catch {
+      log.error("mcp proxy close failed");
     }
   }
 
@@ -389,6 +426,7 @@ export class TaskRun {
 
   async shutdown(): Promise<void> {
     await this.serverHandle?.shutdown();
+    await this.closeMcpProxy();
   }
 }
 
