@@ -60,7 +60,7 @@ export function validate(
   if (agentResult && !agentResult.ok) errors.push(...agentResult.errors);
 
   validateUserIdentity(input.user_identity, errors);
-  validateMcpServers(input.mcp_servers, errors);
+  validateMcpServers(input.mcp_servers, input.credentials, errors);
 
   if (errors.length > 0) return { ok: false, errors };
 
@@ -318,9 +318,10 @@ function validateUserIdentity(value: unknown, errors: FieldError[]): void {
 /**
  * The optional `mcp_servers` block; absent defaults to no servers. Only
  * `type: "http"` is accepted — a `stdio` entry would turn a manifest field
- * into a command this process spawns.
+ * into a command this process spawns. `credentials` is the raw top-level
+ * block, needed by the proxy rule: a `credentials_url` is only usable with it.
  */
-function validateMcpServers(value: unknown, errors: FieldError[]): void {
+function validateMcpServers(value: unknown, credentials: unknown, errors: FieldError[]): void {
   if (value === undefined) return;
   if (!isObject(value)) {
     errors.push({ field: "mcp_servers", reason: "must be an object" });
@@ -337,7 +338,7 @@ function validateMcpServers(value: unknown, errors: FieldError[]): void {
     const urlReason = nonEmptyString(server.url);
     if (urlReason) {
       errors.push({ field: `mcp_servers.${name}.url`, reason: urlReason });
-    } else if (!(server.url as string).startsWith("https://") || (server.url as string) === "https://") {
+    } else if (!isHttpsUrlWithHost(server.url as string)) {
       // headers carries a live bearer token, so plaintext is never acceptable.
       errors.push({ field: `mcp_servers.${name}.url`, reason: "must start with https:// and name a host" });
     }
@@ -357,6 +358,59 @@ function validateMcpServers(value: unknown, errors: FieldError[]): void {
         }
       }
     }
+    if ("proxy" in server) validateProxy(name, server, isObject(credentials), errors);
+  }
+}
+
+/** True for an `https://` URL that names a host. */
+function isHttpsUrlWithHost(value: string): boolean {
+  return value.startsWith("https://") && value !== "https://";
+}
+
+/**
+ * A proxied entry is only useful if the proxy can obtain a credential: either
+ * from `credentials_url` (authenticated by the top-level `credentials` block)
+ * or from inline `headers`. Checked at boot so a dead entry is a 400, not a 401
+ * at the first tool call.
+ */
+function validateProxy(
+  name: string,
+  server: Record<string, unknown>,
+  hasCredentialsBlock: boolean,
+  errors: FieldError[],
+): void {
+  const field = `mcp_servers.${name}.proxy`;
+  const proxy = server.proxy;
+  if (!isObject(proxy)) {
+    errors.push({ field, reason: "must be an object" });
+    return;
+  }
+
+  const idReason = nonEmptyString(proxy.server_id);
+  if (idReason) errors.push({ field: `${field}.server_id`, reason: idReason });
+
+  let credentialsUrlOk = false;
+  if (proxy.credentials_url !== undefined) {
+    const urlReason = nonEmptyString(proxy.credentials_url);
+    if (urlReason) {
+      errors.push({ field: `${field}.credentials_url`, reason: urlReason });
+    } else if (!isHttpsUrlWithHost(proxy.credentials_url as string)) {
+      errors.push({
+        field: `${field}.credentials_url`,
+        reason: "must start with https:// and name a host",
+      });
+    } else {
+      credentialsUrlOk = true;
+    }
+  }
+
+  const hasHeaders = isObject(server.headers) && Object.keys(server.headers).length > 0;
+  const hasCredentialsUrl = credentialsUrlOk && hasCredentialsBlock;
+  // A malformed credentials_url already has its own error; don't pile on.
+  if (proxy.credentials_url === undefined || credentialsUrlOk) {
+    if (!hasCredentialsUrl && !hasHeaders) {
+      errors.push({ field, reason: "needs credentials_url with a credentials block, or headers" });
+    }
   }
 }
 
@@ -373,11 +427,23 @@ function buildMcpServers(value: unknown): Record<string, McpHttpServer> {
           ) as Record<string, string>)
         : undefined;
 
+      const proxy = isObject(s.proxy)
+        ? {
+            server_id: s.proxy.server_id as string,
+            ...(typeof s.proxy.credentials_url === "string"
+              ? { credentials_url: s.proxy.credentials_url }
+              : {}),
+          }
+        : undefined;
+
       return [
         name,
-        headers
-          ? { type: "http" as const, url: s.url as string, headers }
-          : { type: "http" as const, url: s.url as string },
+        {
+          type: "http" as const,
+          url: s.url as string,
+          ...(headers ? { headers } : {}),
+          ...(proxy ? { proxy } : {}),
+        },
       ];
     }),
   );

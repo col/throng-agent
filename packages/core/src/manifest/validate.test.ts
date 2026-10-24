@@ -319,6 +319,137 @@ describe("mcp_servers", () => {
       });
     }
   });
+
+  describe("proxy", () => {
+    const creds = { url: "https://cp.example/credentials", token: "task-tok" };
+    const proxied = (proxy: unknown, extra: Record<string, unknown> = {}) => ({
+      type: "http",
+      url: "https://mcp.example/mcp",
+      proxy,
+      ...extra,
+    });
+
+    it("accepts a proxied entry with credentials_url and credentials", () => {
+      const result = mcp({
+        credentials: creds,
+        mcp_servers: {
+          linear: proxied({ server_id: "srv-1", credentials_url: "https://cp.example/mcp/srv-1" }),
+        },
+      });
+
+      expect(result.ok).toBe(true);
+    });
+
+    it("accepts a proxied entry with inline headers", () => {
+      const result = mcp({
+        mcp_servers: {
+          linear: proxied({ server_id: "srv-1" }, { headers: { Authorization: "Bearer t" } }),
+        },
+      });
+
+      expect(result.ok).toBe(true);
+    });
+
+    it("rejects a proxied entry with neither", () => {
+      const result = mcp({ mcp_servers: { linear: proxied({ server_id: "srv-1" }) } });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors).toContainEqual({
+          field: "mcp_servers.linear.proxy",
+          reason: "needs credentials_url with a credentials block, or headers",
+        });
+      }
+    });
+
+    it("rejects credentials_url without a top-level credentials block", () => {
+      const result = mcp({
+        mcp_servers: {
+          linear: proxied({ server_id: "srv-1", credentials_url: "https://cp.example/mcp/srv-1" }),
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.field === "mcp_servers.linear.proxy")).toBe(true);
+      }
+    });
+
+    it("rejects a non-https credentials_url", () => {
+      const result = mcp({
+        credentials: creds,
+        mcp_servers: {
+          linear: proxied({ server_id: "srv-1", credentials_url: "http://cp.example/mcp/srv-1" }),
+        },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.field === "mcp_servers.linear.proxy.credentials_url")).toBe(
+          true,
+        );
+      }
+    });
+
+    it("rejects a credentials_url with no host", () => {
+      const result = mcp({
+        credentials: creds,
+        mcp_servers: { linear: proxied({ server_id: "srv-1", credentials_url: "https://" }) },
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.errors.some((e) => e.field === "mcp_servers.linear.proxy.credentials_url")).toBe(
+          true,
+        );
+      }
+    });
+
+    it("rejects a non-object proxy", () => {
+      const result = mcp({ mcp_servers: { linear: proxied("nope") } });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.errors.some((e) => e.field === "mcp_servers.linear.proxy")).toBe(true);
+    });
+
+    it("rejects a missing or empty server_id", () => {
+      for (const proxy of [{}, { server_id: "" }, { server_id: 5 }]) {
+        const result = mcp({
+          mcp_servers: { linear: proxied(proxy, { headers: { Authorization: "Bearer t" } }) },
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.errors.some((e) => e.field === "mcp_servers.linear.proxy.server_id")).toBe(true);
+        }
+      }
+    });
+
+    it("buildMcpServers preserves proxy", () => {
+      const result = mcp({
+        credentials: creds,
+        mcp_servers: {
+          linear: proxied({ server_id: "srv-1", credentials_url: "https://cp.example/mcp/srv-1" }),
+          other: proxied({ server_id: "srv-2" }, { headers: { Authorization: "Bearer t" } }),
+        },
+      });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.manifest.mcp_servers.linear).toEqual({
+          type: "http",
+          url: "https://mcp.example/mcp",
+          proxy: { server_id: "srv-1", credentials_url: "https://cp.example/mcp/srv-1" },
+        });
+        expect(result.manifest.mcp_servers.other).toEqual({
+          type: "http",
+          url: "https://mcp.example/mcp",
+          headers: { Authorization: "Bearer t" },
+          proxy: { server_id: "srv-2" },
+        });
+      }
+    });
+  });
 });
 
 describe("credentials block", () => {
