@@ -42,3 +42,4 @@ export {
 } from "./creds/config.js";
 export { checkInitToken } from "./control/init-token.js";
 export { log } from "./log.js";
+export { startMcpProxy, McpCredentialError, type McpProxyHandle } from "./mcp-proxy/index.js";
