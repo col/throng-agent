@@ -276,8 +276,8 @@ re-checks at least every 300 seconds, so a revoked server stops working
 promptly. A `401` from the upstream triggers one refetch and one retry of the
 request; if the retry is rejected too, the engine gets a JSON-RPC credential
 error (status `502`, code `-32001`) rather than the `401`, so it never tries
-OAuth discovery against the loopback. A proxy that cannot start fails the boot
-at step `mcp`.
+OAuth discovery against the loopback. A request body over 16 MiB is answered
+with `413`. A proxy that cannot start fails the boot at step `mcp`.
 
 `/api/prepare` **rejects** `mcp_servers`, `proxy` entries included, with a `400`, exactly as it
 rejects `agent` and `user_identity`: a snapshot is shared by every task in a

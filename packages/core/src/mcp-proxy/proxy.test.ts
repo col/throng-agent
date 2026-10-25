@@ -231,6 +231,23 @@ describe("startMcpProxy", () => {
     expect(creds.seen).toHaveLength(2);
   });
 
+  it("answers an oversized request body with 413 and never calls upstream", async () => {
+    const upstream = await stub((_req, res) => json(res, 200, {}));
+    const creds = await credsApi();
+    const proxy = await proxyFor(upstream, creds);
+
+    const res = await fetch(proxy.engineServers.notion!.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: new Uint8Array(16 * 1024 * 1024 + 1),
+    });
+
+    expect(res.status).toBe(413);
+    expect(await res.text()).toBe("Request body too large");
+    expect(upstream.seen).toHaveLength(0);
+    expect(creds.seen).toHaveLength(0);
+  });
+
   it("returns a JSON-RPC error with Throng's message when credentials 409", async () => {
     const upstream = await stub((_req, res) => json(res, 200, {}));
     const creds = await credsApi(() => ({ status: 409, body: { message: "Reconnect Notion in Throng" } }));

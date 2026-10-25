@@ -36,22 +36,25 @@ function isProxied(server: McpHttpServer): server is ProxiedServer {
 const REJECTED_CREDENTIALS =
   "The MCP server rejected Throng's credentials. Reconnect it in Throng organisation settings.";
 
-class BodyTooLargeError extends Error {}
-
-function readBody(req: IncomingMessage): Promise<Buffer> {
+/**
+ * Reads the request body, or resolves `null` once it passes the cap. Past the
+ * cap the rest is read and discarded rather than the socket destroyed, so the
+ * engine still gets a clean 413 instead of a reset mid-upload.
+ */
+function readBody(req: IncomingMessage): Promise<Buffer | null> {
   return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
+    let chunks: Buffer[] | null = [];
     let size = 0;
     req.on("data", (chunk: Buffer) => {
+      if (chunks === null) return;
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        reject(new BodyTooLargeError());
-        req.destroy();
+        chunks = null;
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("end", () => resolve(chunks === null ? null : Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
@@ -122,16 +125,16 @@ export async function startMcpProxy(
       return;
     }
 
-    let body: Buffer;
+    let body: Buffer | null;
     try {
       body = await readBody(req);
-    } catch (e) {
-      if (e instanceof BodyTooLargeError) {
-        res.writeHead(413, { "content-type": "text/plain" });
-        res.end("Request body too large");
-      } else {
-        res.destroy();
-      }
+    } catch {
+      res.destroy();
+      return;
+    }
+    if (body === null) {
+      res.writeHead(413, { "content-type": "text/plain" });
+      res.end("Request body too large");
       return;
     }
     const id = requestId(body);
