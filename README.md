@@ -42,6 +42,14 @@ Throng agent works best when run on a platform such as [E2B.dev](https://e2b.dev
       "type": "http",                 // Streamable HTTP is the only transport accepted
       "url": "https://control-plane.example/orgs/<uuid>/mcp",
       "headers": { "Authorization": "Bearer …" }
+    },
+    "linear": {                       // third-party server, credential fetched per request
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "proxy": {
+        "server_id": "<uuid>",        // sent back to the credentials endpoint
+        "credentials_url": "https://control-plane.example/mcp-credentials"
+      }
     }
   },
   "agent": {
@@ -235,8 +243,43 @@ point at). The block reaches the engine as the SDK's own `mcp` config and is
 attached only when non-empty, so it never displaces the wrapper's reserved
 `a2a-subagents` key.
 
-Headers arrive already resolved, are handed straight to the SDK, and are never
-logged. `/api/prepare` **rejects** the block with a `400`, exactly as it
+Headers on a plain entry arrive already resolved, are handed straight to the
+SDK, and are never logged.
+
+#### `proxy`
+
+An entry with a `proxy` block is a third-party server whose credential is
+short-lived and must not sit in the manifest. Instead of the real URL, the
+engine is given `http://127.0.0.1:<port>/mcp/<name>`, served by a proxy inside
+the sandbox that forwards each request upstream with a current credential.
+Nothing is configured on the engine's side; it just sees a loopback server.
+
+- `server_id` (required) identifies the server to the control plane.
+- `credentials_url` (optional, `https://`) is the endpoint the proxy asks for
+  credentials. It is authenticated with the top-level `credentials.token`, so
+  it needs a `credentials` block.
+- Without `credentials_url`, the proxy uses the entry's inline `headers`
+  unchanged. This is the development mode: a static header, no endpoint.
+- An entry with neither is rejected at boot as `mcp_servers.<name>.proxy`.
+
+The credentials endpoint contract: the proxy POSTs to `credentials_url` with
+`Authorization: Bearer <credentials.token>` and a JSON body of
+`{ "server": "<name>", "server_id": "<id>", "url": "<upstream url>" }`. A `200`
+answers `{ "headers": { … }, "expires_at": "<ISO 8601>" }`. Throng always sets
+`expires_at`, never more than 300 seconds from now. Failures answer
+`{ "message": "…" }` with `400`, `403`, `409` or `503`; the proxy surfaces them to
+the engine as a JSON-RPC error carrying the `message` (so it must be safe for
+the model to read); header values are never logged.
+
+The proxy caches a credential until shortly before `expires_at`, and
+re-checks at least every 300 seconds, so a revoked server stops working
+promptly. A `401` from the upstream triggers one refetch and one retry of the
+request; if the retry is rejected too, the engine gets a JSON-RPC credential
+error (status `502`, code `-32001`) rather than the `401`, so it never tries
+OAuth discovery against the loopback. A request body over 16 MiB is answered
+with `413`. A proxy that cannot start fails the boot at step `mcp`.
+
+`/api/prepare` **rejects** `mcp_servers`, `proxy` entries included, with a `400`, exactly as it
 rejects `agent` and `user_identity`: a snapshot is shared by every task in a
 project, so it may carry no per-task credential.
 

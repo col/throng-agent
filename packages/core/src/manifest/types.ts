@@ -77,6 +77,18 @@ export interface McpHttpServer {
   type: "http";
   url: string;
   headers?: Record<string, string>;
+  /**
+   * Routes this server through the in-sandbox loopback proxy. `server_id`
+   * names the server on the control plane. `credentials_url` is where the
+   * proxy fetches a short-lived credential (authenticated with the top-level
+   * `credentials` token); absent, the proxy uses `headers`. Holds no secret.
+   */
+  proxy?: McpProxy;
+}
+
+export interface McpProxy {
+  server_id: string;
+  credentials_url?: string;
 }
 
 /** Engine-agnostic manifest skeleton owned by core: a workspace plus the commit

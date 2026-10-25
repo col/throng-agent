@@ -27,6 +27,7 @@ export type {
   UserIdentity,
   CredentialsConfig,
   McpHttpServer,
+  McpProxy,
 } from "./manifest/types.js";
 export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export { homeDir, type Env } from "./env.js";
@@ -41,3 +42,4 @@ export {
 } from "./creds/config.js";
 export { checkInitToken } from "./control/init-token.js";
 export { log } from "./log.js";
+export { startMcpProxy, McpCredentialError, type McpProxyHandle } from "./mcp-proxy/index.js";
