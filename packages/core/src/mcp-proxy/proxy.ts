@@ -33,6 +33,9 @@ function isProxied(server: McpHttpServer): server is ProxiedServer {
   return server.proxy !== undefined;
 }
 
+const REJECTED_CREDENTIALS =
+  "The MCP server rejected Throng's credentials. Reconnect it in Throng organisation settings.";
+
 class BodyTooLargeError extends Error {}
 
 function readBody(req: IncomingMessage): Promise<Buffer> {
@@ -170,6 +173,14 @@ export async function startMcpProxy(
         await upstream.body?.cancel().catch(() => {});
         cache.invalidate(name);
         upstream = await send();
+      }
+      if (upstream.status === 401) {
+        // Still rejected with fresh credentials. Passing the 401 on would invite
+        // the engine to start its own OAuth discovery against the loopback.
+        await upstream.body?.cancel().catch(() => {});
+        log.warn("mcp proxy: upstream rejected credentials", { server: name });
+        sendJsonRpcError(res, 502, id, JSON_RPC_CREDENTIAL_ERROR, REJECTED_CREDENTIALS);
+        return;
       }
     } catch (e) {
       if (abort.signal.aborted) return;

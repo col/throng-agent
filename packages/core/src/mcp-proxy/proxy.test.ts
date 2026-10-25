@@ -203,14 +203,30 @@ describe("startMcpProxy", () => {
     expect(creds.seen).toHaveLength(2);
   });
 
-  it("does not retry twice", async () => {
-    const upstream = await stub((_req, res) => json(res, 401, { error: "nope" }));
+  it("does not retry twice, and turns the final 401 into a credential error", async () => {
+    const upstream = await stub((_req, res) =>
+      json(res, 401, { error: "nope" }, { "www-authenticate": 'Bearer resource_metadata="https://x/prm"' }),
+    );
     const creds = await credsApi();
     const proxy = await proxyFor(upstream, creds);
 
-    const res = await fetch(proxy.engineServers.notion!.url, { method: "POST", headers: { "content-type": "application/json" }, body: rpc() });
+    const res = await fetch(proxy.engineServers.notion!.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: rpc(4),
+    });
 
-    expect(res.status).toBe(401);
+    // Not a 401: the engine must not start its own OAuth discovery against the loopback.
+    expect(res.status).toBe(502);
+    expect(res.headers.get("www-authenticate")).toBeNull();
+    expect(await res.json()).toEqual({
+      jsonrpc: "2.0",
+      id: 4,
+      error: {
+        code: -32001,
+        message: "The MCP server rejected Throng's credentials. Reconnect it in Throng organisation settings.",
+      },
+    });
     expect(upstream.seen).toHaveLength(2);
     expect(creds.seen).toHaveLength(2);
   });
