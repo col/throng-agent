@@ -2,6 +2,8 @@ export { startControlServer, buildServer, createControlApp, defaultBootDeps } fr
 export {
   TaskRun,
   resolveWorkingDirectory,
+  projectEnv,
+  RESERVED_ENV_KEYS,
   type BootDeps,
   type BootAcceptance,
   type InitialiseResult,

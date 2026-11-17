@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Manifest } from "@throng/agent-core";
+import { RESERVED_ENV_KEYS, type Manifest } from "@throng/agent-core";
 import { ClaudeEngineAdapter } from "./adapter.js";
 import { CLAUDE_AUTH_ALSO_SCRUB, CLAUDE_AUTH_SCHEMES } from "./config/credentials.js";
 import type { ResolvedClaudeAgent } from "./manifest/claude-agent.js";
@@ -117,5 +117,14 @@ describe("ClaudeEngineAdapter", () => {
         },
       } as unknown as Manifest<ResolvedClaudeAgent>),
     ).toThrow();
+  });
+});
+
+// Core lists the credential names literally because it cannot import this
+// package. If a scheme is added here and not there, a project's `env` could set
+// the new credential and rebill the run, so the set is pinned from this side.
+describe("RESERVED_ENV_KEYS", () => {
+  it.each(CREDENTIAL_VARS)("reserves the credential variable %s", (name) => {
+    expect(RESERVED_ENV_KEYS.has(name)).toBe(true);
   });
 });

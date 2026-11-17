@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 import type { GitResult } from "./bootstrap/git.js";
-import { describeSetupFailure, redactTokens, type SetupResult } from "./bootstrap/setup.js";
+import { describeSetupFailure, redactTokens, type SetupOptions, type SetupResult } from "./bootstrap/setup.js";
 import type { AdapterRegistry, EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import { Lifecycle } from "./lifecycle.js";
 import { log } from "./log.js";
@@ -13,12 +13,70 @@ import { validate, validatePrepare } from "./manifest/validate.js";
  *  resolves correctly regardless of the working directory's own name. */
 const ATTACHMENTS_DIRNAME = "attachments";
 
+/**
+ * Environment variable names a project's `env` and `secrets` may not set. Each
+ * is read by something that must see the sandbox's own value, not the
+ * project's, and nothing downstream of the manifest would notice an override:
+ *
+ * - Engine credentials, which the adapter's `injectCredentials` selects and
+ *   whose competitors it scrubs: `CLAUDE_AUTH_SCHEMES` and
+ *   `CLAUDE_AUTH_ALSO_SCRUB` in `throng-agent-claude/src/config/credentials.ts`,
+ *   `CODEX_AUTH_SCHEMES` in `throng-agent-codex/src/config/credentials.ts`. A
+ *   project value here would rebill the run to an account nobody chose. Core
+ *   cannot import the adapters, so the names are literal; each adapter's test
+ *   suite asserts its own names are a subset of this set.
+ * - The `throng-creds` handshake: `HOME`, `THRONG_CONFIG`, `THRONG_CREDS_CACHE`
+ *   and `WORKSPACE_DIR` (see `creds/config.ts`, `creds/throng-creds.sh`). git
+ *   starts the helper from the agent's shells after boot, and it locates the
+ *   credential config through these in the environment it inherits.
+ * - `PATH`, through which the engine SDK finds its own binary.
+ *
+ * The wrapper's own config variables (`PORT`, `LOG_LEVEL`, ...) are not here:
+ * `applyProjectEnv` runs after the config is built, so ordering protects them.
+ *
+ * Mirrored on the control plane by
+ * `Throng.Projects.Project.Validations.EnvironmentVariableKeys` in throngx,
+ * which rejects these at save time so the user learns there. This set is the
+ * guarantee and that one the courtesy: a stale server list cannot break it.
+ */
+export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "OPENAI_API_KEY",
+  "HOME",
+  "THRONG_CONFIG",
+  "THRONG_CREDS_CACHE",
+  "WORKSPACE_DIR",
+  "PATH",
+]);
+
+/**
+ * The project variables to apply: `env`, then `secrets` over it, minus
+ * `RESERVED_ENV_KEYS`. Validation rejects a key present in both maps, so the
+ * merge order only matters if that guard is ever removed — and then the
+ * redacted side wins. A skipped key is logged by NAME; the value is never
+ * logged, because for `secrets` the value is the credential.
+ */
+export function projectEnv(manifest: WorkspaceManifest): Record<string, string> {
+  const merged = { ...(manifest.env ?? {}), ...(manifest.secrets ?? {}) };
+  return Object.fromEntries(
+    Object.entries(merged).filter(([key]) => {
+      if (!RESERVED_ENV_KEYS.has(key)) return true;
+      log.warn("project env key skipped", { key });
+      return false;
+    }),
+  );
+}
+
 /** Engine-agnostic boot dependencies. */
 export interface BootDeps {
   /** Clone-or-resync, because a sandbox restored from a project snapshot already
    *  has every `dest` on disk and `git clone` fails outright when it does. */
   syncOrClone: (url: string, dest: string, ref: string) => Promise<GitResult>;
-  runSetupCommands: (cwd: string, commands: string[]) => Promise<SetupResult>;
+  /** `opts.env` is the full environment setup commands see — the only route by
+   *  which project variables reach them on the prepare path. */
+  runSetupCommands: (cwd: string, commands: string[], opts?: SetupOptions) => Promise<SetupResult>;
   writeCredentialConfig: (manifest: WorkspaceManifest) => void;
   /** Removes the credential config and every token minted from it, before a
    *  prepared workspace is snapshotted. */
@@ -95,6 +153,8 @@ export class TaskRun {
       platform: result.manifest.platform,
       repos: result.manifest.repos.length,
       setupCommands: result.manifest.setup_commands.length,
+      envCount: Object.keys(result.manifest.env ?? {}).length,
+      secretCount: Object.keys(result.manifest.secrets ?? {}).length,
     });
     void this.boot(result.manifest, result.adapter);
     return { ok: true, status: "booting" };
@@ -133,6 +193,8 @@ export class TaskRun {
     log.info("prepare accepted; warming the workspace asynchronously", {
       repos: result.manifest.repos.length,
       setupCommands: result.manifest.setup_commands.length,
+      envCount: Object.keys(result.manifest.env ?? {}).length,
+      secretCount: Object.keys(result.manifest.secrets ?? {}).length,
     });
     void this.prepareWorkspace(result.manifest);
     return { ok: true, status: "booting" };
@@ -182,6 +244,11 @@ export class TaskRun {
       // gone, and "could not write the config" is a harmless dead sandbox while
       // "could not wipe the config" means a sandbox may still be sitting there
       // with a live token on disk. Those want different responses.
+      //
+      // Project `env` and `secrets` need no equivalent step: on this path they
+      // reach setup commands only through runSetup's explicit `env` option and
+      // never enter `process.env`, so there is nothing to unset before the
+      // snapshot captures this process's memory.
       log.info("prepare step: deleting the credential config and token cache");
       try {
         this.deps.deleteCredentialConfig();
@@ -226,6 +293,7 @@ export class TaskRun {
       const extraDirs = (manifest.attachments ?? []).length > 0 ? [attachmentsDir] : [];
       const engineManifest = await this.startMcpProxy(manifest);
       const config = adapter.buildAgentConfig(engineManifest, workingDirectory, extraDirs);
+      this.applyProjectEnv(manifest);
       log.info("boot step: starting A2A server", { workingDirectory });
       try {
         this.serverHandle = await adapter.createA2AServer(config);
@@ -240,6 +308,32 @@ export class TaskRun {
       await this.closeMcpProxy();
       this.reportFailure(err);
     }
+  }
+
+  /**
+   * Writes the project's variables into this process's environment, so every
+   * SDK query the server runs, and every shell the agent opens, inherits them.
+   * Boot only: `prepareWorkspace` must never call this (spec §5.3).
+   *
+   * The position in `boot()` is load-bearing on both sides:
+   *
+   * - AFTER `buildAgentConfig`, because the wrapper reads its own settings
+   *   (`PORT`, `LOG_LEVEL`, `HOSTNAME`, ...) from `process.env` while building
+   *   the config. Applied earlier, a project variable of the same name would
+   *   reconfigure the agent server; applied here, those are ordinary variables
+   *   a project may set. Also after `injectCredentials`, so together with the
+   *   reserved credential names the adapter's "selected credential wins,
+   *   competitors scrubbed" guarantee cannot be disturbed.
+   * - BEFORE `createA2AServer`, because what the server spawns inherits the
+   *   environment as it stands when it starts.
+   *
+   * Moving this call in either direction breaks one of those silently; the
+   * spy-ordered tests in task-run.test.ts ("project env") pin it.
+   */
+  private applyProjectEnv(manifest: Manifest): void {
+    const vars = projectEnv(manifest);
+    log.info("boot step: applying project environment", { count: Object.keys(vars).length });
+    Object.assign(process.env, vars);
   }
 
   /**
@@ -396,12 +490,24 @@ export class TaskRun {
     // is already in place. See describeSetupFailure: their output is redacted
     // before it leaves this process.
     log.info(`${phase} step: running setup commands`, { count: manifest.setup_commands.length, cwd });
-    const setup = await this.deps.runSetupCommands(cwd, manifest.setup_commands);
+    // Project variables reach setup through an explicit environment, never by
+    // mutating `process.env`: this runs on the prepare path too, where anything
+    // in `process.env` at `prepared` is captured into the snapshot's memory and
+    // resurrected in every sandbox restored from it (spec §5.3). Merged over
+    // `process.env` rather than replacing it, so PATH and HOME still resolve.
+    const secretValues = Object.values(manifest.secrets ?? {});
+    const setup = await this.deps.runSetupCommands(cwd, manifest.setup_commands, {
+      env: { ...process.env, ...projectEnv(manifest) },
+      secretValues,
+    });
     if (!setup.ok) {
       // `describeSetupFailure` carries the failing command, a decoded signal exit
       // (137 = OOM-killed, the common one) and the tail of its output — without
-      // it the orchestrator only ever saw "(exit 137)" with no clue why.
-      throw new StepError("setup", describeSetupFailure(setup));
+      // it the orchestrator only ever saw "(exit 137)" with no clue why. The
+      // secret values go with it: the message becomes the control plane's
+      // `instance.error_message`, and a command that echoes its environment
+      // would otherwise carry them there.
+      throw new StepError("setup", describeSetupFailure(setup, secretValues));
     }
   }
 

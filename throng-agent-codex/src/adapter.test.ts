@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { Manifest } from "@throng/agent-core";
+import { RESERVED_ENV_KEYS, type Manifest } from "@throng/agent-core";
 import { CodexEngineAdapter } from "./adapter.js";
 import { CODEX_AUTH_SCHEMES } from "./config/credentials.js";
 import type { ResolvedCodexAgent } from "./manifest/codex-agent.js";
@@ -46,5 +46,14 @@ describe("CodexEngineAdapter", () => {
       } as unknown as Manifest<ResolvedCodexAgent>);
       expect(process.env.OPENAI_API_KEY).toBe("sk-ambient");
     });
+  });
+});
+
+// Core lists the credential names literally because it cannot import this
+// package. If a scheme is added here and not there, a project's `env` could set
+// the new credential and rebill the run, so the set is pinned from this side.
+describe("RESERVED_ENV_KEYS", () => {
+  it.each(CREDENTIAL_VARS)("reserves the credential variable %s", (name) => {
+    expect(RESERVED_ENV_KEYS.has(name)).toBe(true);
   });
 });
