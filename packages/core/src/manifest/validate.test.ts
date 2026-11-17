@@ -841,4 +841,14 @@ describe.each([
       { field: "secrets.X", reason: "also set in env" },
     ]);
   });
+
+  // `key in env` walks the prototype chain, so these would be falsely "also set in env".
+  it.each(["toString", "constructor", "valueOf", "hasOwnProperty"])(
+    "accepts a secret named %s when env does not define it",
+    (name) => {
+      const r = run({ env: { NODE_ENV: "test" }, secrets: { [name]: "x" } });
+
+      expect(r.ok).toBe(true);
+    },
+  );
 });

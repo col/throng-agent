@@ -221,7 +221,7 @@ function validateWorkspace(input: Record<string, unknown>, errors: FieldError[])
   // same rule; this is the sandbox's own guard.
   if (isObject(input.env) && isObject(input.secrets)) {
     for (const key of Object.keys(input.secrets)) {
-      if (key in input.env) errors.push({ field: `secrets.${key}`, reason: "also set in env" });
+      if (Object.hasOwn(input.env, key)) errors.push({ field: `secrets.${key}`, reason: "also set in env" });
     }
   }
 }
