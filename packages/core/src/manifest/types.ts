@@ -65,6 +65,17 @@ export interface WorkspaceManifest {
   /** Task file attachments, downloaded to a sibling `attachments/` dir at boot.
    *  Optional on the wire; defaults to [] when absent. */
   attachments: AttachmentSpec[];
+  /**
+   * Project environment variables, applied to the sandbox's environment.
+   * Optional on the wire; defaults to {} when absent. On WorkspaceManifest
+   * rather than BaseManifest because `/api/prepare` receives them too.
+   */
+  env: Record<string, string>;
+  /**
+   * Same effect as `env`, but its values are redacted from everything that
+   * leaves the process. Optional on the wire; defaults to {} when absent.
+   */
+  secrets: Record<string, string>;
 }
 
 /**
