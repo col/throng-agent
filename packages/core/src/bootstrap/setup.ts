@@ -20,8 +20,34 @@ const OUTPUT_TAIL_CHARS = 2000;
  */
 const TOKEN_PATTERN = /gh[pousr]_[A-Za-z0-9]{16,}/g;
 
+const REDACTED = "[REDACTED]";
+
+/**
+ * Options for `runSetupCommands`. `env` is the full environment the shell sees
+ * (the caller merges project env over `process.env`); `secretValues` are the
+ * resolved project-secret values to scrub from every log line and failure message.
+ */
+export interface SetupOptions {
+  env?: NodeJS.ProcessEnv;
+  secretValues?: readonly string[];
+}
+
+/**
+ * Masks GitHub tokens plus any literal `extraValues` (resolved project secrets).
+ * Longest values go first so a value that contains another (`abc` inside
+ * `abcdef`) is replaced whole instead of leaving the remainder behind. Values are
+ * matched literally via split/join — never as a pattern — and empty ones are
+ * skipped, since splitting on "" would shred the text.
+ */
+export function redactSecrets(text: string, extraValues: readonly string[] = []): string {
+  let out = text.replace(TOKEN_PATTERN, REDACTED);
+  const values = extraValues.filter((v) => v !== "").sort((a, b) => b.length - a.length);
+  for (const value of values) out = out.split(value).join(REDACTED);
+  return out;
+}
+
 export function redactTokens(text: string): string {
-  return text.replace(TOKEN_PATTERN, "[REDACTED]");
+  return redactSecrets(text);
 }
 
 /**
@@ -42,9 +68,10 @@ const SIGNAL_EXITS: Record<number, string> = {
 function runOne(
   cwd: string,
   command: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<{ code: number; signal: string | null; output: string }> {
   return new Promise((resolve) => {
-    execFile("/bin/sh", ["-c", command], { cwd, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile("/bin/sh", ["-c", command], { cwd, env, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
       const output = `${stdout}${stderr}`;
       if (err) {
         const signal = (err as { signal?: string | null }).signal ?? null;
@@ -78,37 +105,45 @@ function tail(output: string, chars = OUTPUT_TAIL_CHARS): string {
  * Setup commands run WITH live credentials under the pull model, so the output
  * is redacted before it leaves this process.
  */
-export function describeSetupFailure(result: Extract<SetupResult, { ok: false }>): string {
+export function describeSetupFailure(
+  result: Extract<SetupResult, { ok: false }>,
+  secretValues: readonly string[] = [],
+): string {
   const how = SIGNAL_EXITS[result.code]
     ? `exit ${result.code} — ${SIGNAL_EXITS[result.code]}`
     : `exit ${result.code}`;
   // Redact BEFORE truncating. The other order slices a token straddling the
   // 2000-char boundary: the `gh?_` prefix falls outside the tail, so the pattern
   // no longer matches and the token's suffix is kept verbatim.
-  const body = tail(redactTokens(result.output));
+  const body = tail(redactSecrets(result.output, secretValues));
   const outputBlock = body ? `\n--- output (tail) ---\n${body}` : "\n(no output)";
   // The command is caller-supplied and as token-bearing as the output: a
   // `git clone https://ghp_…@github.com/…` in `setup_commands` lands in the same
   // `instance.error_message`.
-  return `setup command failed: ${redactTokens(result.command)} (${how})${outputBlock}`;
+  return `setup command failed: ${redactSecrets(result.command, secretValues)} (${how})${outputBlock}`;
 }
 
 /** Runs commands sequentially in `cwd`; the first non-zero exit fails the run. */
-export async function runSetupCommands(cwd: string, commands: string[]): Promise<SetupResult> {
+export async function runSetupCommands(
+  cwd: string,
+  commands: string[],
+  opts: SetupOptions = {},
+): Promise<SetupResult> {
+  const { env = process.env, secretValues = [] } = opts;
   for (const [index, command] of commands.entries()) {
     const step = `${index + 1}/${commands.length}`;
     // Logged redacted, returned verbatim: `command` is passed to the shell from
     // the manifest, so it may carry a token, but the caller needs the real string.
-    const safeCommand = redactTokens(command);
+    const safeCommand = redactSecrets(command, secretValues);
     log.info("setup command starting", { step, command: safeCommand, cwd });
     const startedAt = Date.now();
-    const { code, signal, output } = await runOne(cwd, command);
+    const { code, signal, output } = await runOne(cwd, command, env);
     const durationMs = Date.now() - startedAt;
 
     if (code !== 0) {
       // Full output at ERROR — the message carries only the tail, and a truncated
       // compile log is exactly what makes these failures hard to diagnose.
-      log.error("setup command failed", { step, command: safeCommand, code, signal, durationMs, output: redactTokens(output) });
+      log.error("setup command failed", { step, command: safeCommand, code, signal, durationMs, output: redactSecrets(output, secretValues) });
       return { ok: false, command, code, signal, output };
     }
 

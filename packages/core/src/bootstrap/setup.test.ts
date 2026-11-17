@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { describeSetupFailure, redactTokens, runSetupCommands } from "./setup.js";
+import { describeSetupFailure, redactSecrets, redactTokens, runSetupCommands } from "./setup.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "a2a-setup-"));
 
@@ -42,6 +42,27 @@ describe("runSetupCommands", () => {
     const r = await runSetupCommands(tmp(), ["kill -9 $$"]);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe(137);
+  });
+
+  it("passes the given environment to the shell", async () => {
+    const dir = tmp();
+    const r = await runSetupCommands(dir, ['echo "$TX_PROBE" > probe.txt'], {
+      env: { ...process.env, TX_PROBE: "hit" },
+    });
+    expect(r.ok).toBe(true);
+    expect(readFileSync(join(dir, "probe.txt"), "utf-8")).toBe("hit\n");
+  });
+
+  it("uses process.env when no env is given", async () => {
+    const dir = tmp();
+    vi.stubEnv("TX_PROBE", "from-process");
+    try {
+      const r = await runSetupCommands(dir, ['echo "$TX_PROBE" > probe.txt']);
+      expect(r.ok).toBe(true);
+      expect(readFileSync(join(dir, "probe.txt"), "utf-8")).toBe("from-process\n");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -168,6 +189,66 @@ describe("token redaction", () => {
   });
 });
 
+describe("redactSecrets", () => {
+  it("still redacts github tokens", () => {
+    expect(redactSecrets("t=ghp_0123456789abcdefghij")).toBe("t=[REDACTED]");
+  });
+
+  it("redacts every occurrence of each secret value", () => {
+    expect(redactSecrets("x=s3cret y=s3cret z=other", ["s3cret", "other"])).toBe(
+      "x=[REDACTED] y=[REDACTED] z=[REDACTED]",
+    );
+  });
+
+  it("redacts longer values first", () => {
+    expect(redactSecrets("abcdef", ["abc", "abcdef"])).toBe("[REDACTED]");
+  });
+
+  it("ignores empty values", () => {
+    expect(redactSecrets("plain text", [""])).toBe("plain text");
+  });
+
+  it("treats values literally, not as patterns", () => {
+    expect(redactSecrets("a.c abc", ["a.c"])).toBe("[REDACTED] abc");
+  });
+});
+
+describe("describeSetupFailure with secret values", () => {
+  it("redacts secret values from command and output", () => {
+    const message = describeSetupFailure(
+      {
+        ok: false,
+        command: "deploy --key hunter2",
+        code: 1,
+        signal: null,
+        output: "auth failed for hunter2\n",
+      },
+      ["hunter2"],
+    );
+
+    expect(message).not.toContain("hunter2");
+    expect(message).toContain("deploy --key [REDACTED]");
+    expect(message).toContain("auth failed for [REDACTED]");
+  });
+
+  it("redacts a secret straddling the truncation boundary", () => {
+    const secret = "s3cr3t-value-ABCDEFGHIJ";
+    const message = describeSetupFailure(
+      {
+        ok: false,
+        command: "noisy",
+        code: 1,
+        signal: null,
+        output: `${"x".repeat(3000)}${secret}${"y".repeat(1990)}`,
+      },
+      [secret],
+    );
+
+    expect(message).toMatch(/earlier chars omitted/);
+    expect(message).not.toContain("ABCDEFGHIJ");
+  });
+});
+
 describe("runSetupCommands logging", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -183,5 +264,19 @@ describe("runSetupCommands logging", () => {
     expect(lines.some((l) => l.includes("setup command starting"))).toBe(true);
     expect(lines.some((l) => l.includes("setup command failed"))).toBe(true);
     for (const line of lines) expect(line).not.toContain("ghp_0123456789abcdefghij");
+  });
+
+  it("redacts secret values from every log line", async () => {
+    const lines: string[] = [];
+    const capture = (line: unknown) => void lines.push(String(line));
+    vi.spyOn(console, "log").mockImplementation(capture);
+    vi.spyOn(console, "error").mockImplementation(capture);
+
+    const r = await runSetupCommands(tmp(), ["echo out-hunter2; exit 3"], { secretValues: ["hunter2"] });
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.output).toContain("hunter2"); // returned verbatim for the caller
+    expect(lines.some((l) => l.includes("setup command failed"))).toBe(true);
+    for (const line of lines) expect(line).not.toContain("hunter2");
   });
 });
