@@ -32,7 +32,10 @@ jobs:
 
       # context is the repo root (the Dockerfile COPYs the whole workspace).
       # github_token build secret feeds the Dockerfile's `npm ci` so it can
-      # install the private @col/a2a-claude from GitHub Packages.
+      # install @col/a2a-claude from GitHub Packages, which requires auth even
+      # for public packages. The workflow's own token (packages: write above)
+      # suffices now that the package is public; the PACKAGES_TOKEN PAT this
+      # used to pass had expired.
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -42,4 +45,4 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           secrets: |
-            github_token=${{ secrets.PACKAGES_TOKEN }}
+            github_token=${{ secrets.GITHUB_TOKEN }}
