@@ -141,8 +141,15 @@ there is present in the environment of every sandbox the project boots.
   handshake with `throng-creds`, a bash helper git starts from the agent's
   shells *after* boot and which reads these from the inherited environment:
   `HOME`, `THRONG_CONFIG`, `THRONG_CREDS_CACHE`, `WORKSPACE_DIR`. And `PATH`,
-  which the SDK needs to find its own binary. The wrapper's config keys above
-  are *not* in this set; 5.3 protects them by ordering instead.
+  which the SDK needs to find its own binary. Then everything the runtime reads
+  lazily, after boot: `THRONG_INIT_TOKEN` (read by the control routes on every
+  request; blank disables their auth), `GIT_TERMINAL_PROMPT` (set to `0` at
+  startup, read by every git invocation), and `THRONG_CREDS_BIN` /
+  `GH_REAL_BIN` (read by the gh shim on every `gh` call). Thirteen names in
+  all. The wrapper's config keys read while the config is built (`A2A_PORT`,
+  `ADVERTISE_HOST`, `ADVERTISE_PROTOCOL`, the `loadEnvOverrides` keys) are
+  *not* in this set; 5.3 protects them by ordering instead, which works only
+  for values read during config build.
 - **The sandbox image** is `ghcr.io/col/throng-agent`, pinned by
   `BETA_VERSION` / `STABLE_VERSION` in `throng_e2b_templates/throng-agent/template.ts`.
 
@@ -209,7 +216,8 @@ data) and rejects:
 - a key in the **reserved set** the sandbox owns:
   `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `OPENAI_API_KEY`, `HOME`, `PATH`, `WORKSPACE_DIR`, `THRONG_CONFIG`,
-  `THRONG_CREDS_CACHE`. The list lives in one module attribute with a comment
+  `THRONG_CREDS_CACHE`, `THRONG_INIT_TOKEN`, `GIT_TERMINAL_PROMPT`,
+  `THRONG_CREDS_BIN`, `GH_REAL_BIN`. The list lives in one module attribute with a comment
   pointing at the agent's `RESERVED_ENV_KEYS` (5.3), which it mirrors. The
   agent skips the same keys when it applies project env, so this is belt and
   braces: the user learns at save time, and a stale server list cannot break
@@ -340,9 +348,12 @@ memory image and resurrected in every restored sandbox (§3). So:
    new `applyProjectEnv(manifest)` step runs **after `buildAgentConfig` and
    before the A2A server starts**. It writes `manifest.env` then
    `manifest.secrets` into `process.env`, skipping `RESERVED_ENV_KEYS` with a
-   `log.warn` naming the skipped key (never the value). Running after config
-   build means `PORT`, `LOG_LEVEL`, `HOSTNAME` and the rest are ordinary
-   variables a project may set: the wrapper has already read its own. Running
+   `log.warn` naming the skipped key (never the value), once per run. Running
+   after config build means settings read during the build (`A2A_PORT`,
+   `ADVERTISE_HOST`, `ADVERTISE_PROTOCOL`, the `loadEnvOverrides` keys such as
+   `PORT` and `LOG_LEVEL`) are ordinary variables a project may set: the
+   wrapper has already read them. Anything read lazily is reserved instead.
+   Running
    after `injectCredentials` and skipping the credential names means the
    adapter's "selected credential wins, competitors scrubbed" guarantee cannot
    be disturbed. Running before the server starts means every SDK query, and
@@ -351,7 +362,9 @@ memory image and resurrected in every restored sandbox (§3). So:
 
 `RESERVED_ENV_KEYS` is exported from core: the Claude and Codex auth-scheme
 env names plus `CLAUDE_AUTH_ALSO_SCRUB`, and `HOME`, `PATH`, `WORKSPACE_DIR`,
-`THRONG_CONFIG`, `THRONG_CREDS_CACHE`. The two existing `log.info` lines that
+`THRONG_CONFIG`, `THRONG_CREDS_CACHE`, plus the names read lazily after boot,
+which ordering cannot protect: `THRONG_INIT_TOKEN`, `GIT_TERMINAL_PROMPT`,
+`THRONG_CREDS_BIN`, `GH_REAL_BIN` (thirteen in all). The two existing `log.info` lines that
 log manifest counts gain `envCount` and `secretCount`; neither map is ever
 logged.
 

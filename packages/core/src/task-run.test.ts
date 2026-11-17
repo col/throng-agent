@@ -872,6 +872,9 @@ describe("project env", () => {
     // The rest of the map still applies; one reserved key does not void it.
     expect(process.env.NODE_ENV).toBe("test");
     expect(warn).toHaveBeenCalledWith("project env key skipped", { key: "PATH" });
+    // Once per run, not once per injection point: boot applies the map in two
+    // places (setup and process.env) but filters it once.
+    expect(warn.mock.calls.filter(([msg]) => msg === "project env key skipped")).toHaveLength(1);
     // Names the key, never the value.
     expect(JSON.stringify(warn.mock.calls)).not.toContain("/evil");
   });
@@ -953,9 +956,21 @@ describe("project env", () => {
 describe("RESERVED_ENV_KEYS", () => {
   // The names spec §5.3 says the sandbox must own outside the adapter
   // credentials (which the adapter packages pin against this set themselves).
-  // THRONG_INIT_TOKEN is read per request by the control routes, after
-  // applyProjectEnv has run, and a blank value disables their auth.
-  it.each(["HOME", "PATH", "WORKSPACE_DIR", "THRONG_CONFIG", "THRONG_CREDS_CACHE", "THRONG_INIT_TOKEN"])("reserves %s", (key) => {
+  // The rest are read lazily, after applyProjectEnv has run, so ordering
+  // cannot protect them: THRONG_INIT_TOKEN per control-route request (blank
+  // disables auth), GIT_TERMINAL_PROMPT by every git invocation, and
+  // THRONG_CREDS_BIN / GH_REAL_BIN by the gh shim on every `gh` call.
+  it.each([
+    "HOME",
+    "PATH",
+    "WORKSPACE_DIR",
+    "THRONG_CONFIG",
+    "THRONG_CREDS_CACHE",
+    "THRONG_INIT_TOKEN",
+    "GIT_TERMINAL_PROMPT",
+    "THRONG_CREDS_BIN",
+    "GH_REAL_BIN",
+  ])("reserves %s", (key) => {
     expect(RESERVED_ENV_KEYS.has(key)).toBe(true);
   });
 });

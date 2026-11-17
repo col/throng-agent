@@ -34,6 +34,12 @@ const ATTACHMENTS_DIRNAME = "attachments";
  *   the control routes, not once at config build. `checkInitToken` treats a
  *   blank value as "no auth configured", so a project setting it to "" would
  *   switch off control-route authentication for the rest of the sandbox's life.
+ * - `GIT_TERMINAL_PROMPT`, set to "0" once by `startControlServer` and read by
+ *   every git invocation after it. A project value would re-enable prompting,
+ *   and a git blocked on a prompt nobody can answer hangs the agent's shell.
+ * - `THRONG_CREDS_BIN` and `GH_REAL_BIN`, which `creds/gh-shim.sh` reads on
+ *   every `gh` call to find the credential helper and the real `gh`. A project
+ *   value would redirect the shim, and the token it fetches, to another binary.
  *
  * Ordering is the other half of the guarantee, and it covers less than it may
  * appear to. `applyProjectEnv` runs after `buildAgentConfig`, so a variable
@@ -41,7 +47,7 @@ const ATTACHMENTS_DIRNAME = "attachments";
  * `ADVERTISE_HOST`, `ADVERTISE_PROTOCOL`, `WORKSPACE_DIR`, and the wrapper's
  * `loadEnvOverrides` keys such as `PORT` and `LOG_LEVEL`. Those may be left
  * out of this set. Anything read lazily, after boot, sees the project's value
- * and must be listed here instead — which is why `THRONG_INIT_TOKEN` is.
+ * and must be listed here instead — which is why the last four entries are.
  *
  * Mirrored on the control plane by
  * `Throng.Projects.Project.Validations.EnvironmentVariableKeys` in throngx,
@@ -59,6 +65,9 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   "WORKSPACE_DIR",
   "PATH",
   "THRONG_INIT_TOKEN",
+  "GIT_TERMINAL_PROMPT",
+  "THRONG_CREDS_BIN",
+  "GH_REAL_BIN",
 ]);
 
 /**
@@ -67,6 +76,9 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
  * merge order only matters if that guard is ever removed — and then the
  * redacted side wins. A skipped key is logged by NAME; the value is never
  * logged, because for `secrets` the value is the credential.
+ *
+ * Call once per run and pass the result down: boot applies the map at two
+ * injection points, and calling this at each would warn twice per key.
  */
 export function projectEnv(manifest: WorkspaceManifest): Record<string, string> {
   const merged = { ...(manifest.env ?? {}), ...(manifest.secrets ?? {}) };
@@ -223,8 +235,9 @@ export class TaskRun {
       // agent, so nothing after this point needs to know where one would have
       // run. A `WorkspaceManifest` also carries no attachments, so nothing
       // downloads on this path regardless.
+      const vars = projectEnv(manifest);
       this.writeCredentials(manifest, "prepare");
-      await this.materialiseWorkspace(manifest, "prepare");
+      await this.materialiseWorkspace(manifest, vars, "prepare");
 
       // A security boundary, not tidiness — and specifically the DISK half of
       // one. Everything still on disk here is captured into an E2B-stored image
@@ -292,8 +305,10 @@ export class TaskRun {
 
   private async boot(manifest: Manifest, adapter: EngineAdapter<any, any>): Promise<void> {
     try {
+      // Filtered once for both injection points below, so a skipped key warns once.
+      const vars = projectEnv(manifest);
       this.writeCredentials(manifest);
-      const { workingDirectory, attachmentsDir } = await this.materialiseWorkspace(manifest);
+      const { workingDirectory, attachmentsDir } = await this.materialiseWorkspace(manifest, vars);
 
       log.info("boot step: injecting engine credentials and commit identity");
       adapter.injectCredentials(manifest);
@@ -306,7 +321,7 @@ export class TaskRun {
       const extraDirs = (manifest.attachments ?? []).length > 0 ? [attachmentsDir] : [];
       const engineManifest = await this.startMcpProxy(manifest);
       const config = adapter.buildAgentConfig(engineManifest, workingDirectory, extraDirs);
-      this.applyProjectEnv(manifest);
+      this.applyProjectEnv(vars);
       log.info("boot step: starting A2A server", { workingDirectory });
       try {
         this.serverHandle = await adapter.createA2AServer(config);
@@ -347,8 +362,7 @@ export class TaskRun {
    * Moving this call in either direction breaks one of those silently; the
    * spy-ordered tests in task-run.test.ts ("project env") pin it.
    */
-  private applyProjectEnv(manifest: Manifest): void {
-    const vars = projectEnv(manifest);
+  private applyProjectEnv(vars: Record<string, string>): void {
     log.info("boot step: applying project environment", { count: Object.keys(vars).length });
     Object.assign(process.env, vars);
   }
@@ -434,6 +448,7 @@ export class TaskRun {
    */
   private async materialiseWorkspace(
     manifest: WorkspaceManifest,
+    vars: Record<string, string>,
     phase: Phase = "boot",
   ): Promise<{ workingDirectory: string; attachmentsDir: string }> {
     // Resolved before the clone, so a manifest with no primary repo fails having
@@ -441,7 +456,7 @@ export class TaskRun {
     const workingDirectory = resolveWorkingDirectory(manifest, this.deps.workspaceRoot);
     const attachmentsDir = join(dirname(workingDirectory), ATTACHMENTS_DIRNAME);
     await this.syncRepos(manifest, phase);
-    await this.runSetup(manifest, workingDirectory, phase);
+    await this.runSetup(manifest, vars, workingDirectory, phase);
 
     const attachments = manifest.attachments ?? [];
     if (attachments.length > 0) {
@@ -501,7 +516,13 @@ export class TaskRun {
     }
   }
 
-  private async runSetup(manifest: WorkspaceManifest, cwd: string, phase: Phase = "boot"): Promise<void> {
+  /** `vars` is `projectEnv(manifest)`, computed once by the caller. */
+  private async runSetup(
+    manifest: WorkspaceManifest,
+    vars: Record<string, string>,
+    cwd: string,
+    phase: Phase = "boot",
+  ): Promise<void> {
     this.lifecycle.set("setup");
     // Setup commands run WITH working git and gh, because the credential config
     // is already in place. See describeSetupFailure: their output is redacted
@@ -514,7 +535,7 @@ export class TaskRun {
     // `process.env` rather than replacing it, so PATH and HOME still resolve.
     const secretValues = Object.values(manifest.secrets ?? {});
     const setup = await this.deps.runSetupCommands(cwd, manifest.setup_commands, {
-      env: { ...process.env, ...projectEnv(manifest) },
+      env: { ...process.env, ...vars },
       secretValues,
     });
     if (!setup.ok) {

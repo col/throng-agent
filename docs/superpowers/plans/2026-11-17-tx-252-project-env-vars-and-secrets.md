@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Key pattern: `/^[A-Za-z_][A-Za-z0-9_]*$/`.
-- `RESERVED_ENV_KEYS` (exported from `packages/core/src/task-run.ts`): `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `HOME`, `PATH`, `WORKSPACE_DIR`, `THRONG_CONFIG`, `THRONG_CREDS_CACHE`.
+- `RESERVED_ENV_KEYS` (exported from `packages/core/src/task-run.ts`): `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `HOME`, `PATH`, `WORKSPACE_DIR`, `THRONG_CONFIG`, `THRONG_CREDS_CACHE`, `THRONG_INIT_TOKEN`, `GIT_TERMINAL_PROMPT`, `THRONG_CREDS_BIN`, `GH_REAL_BIN` (thirteen; the last four are read lazily after boot, so ordering cannot protect them).
 - `process.env` is never mutated on the prepare path.
 - On boot, `process.env` is mutated only after `adapter.buildAgentConfig` returns and before `adapter.createA2AServer` is called.
 - No log line and no error message ever contains a secret value or the `env`/`secrets` maps; counts only.
