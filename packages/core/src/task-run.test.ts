@@ -789,8 +789,7 @@ describe("project env", () => {
     await tr.initialise({ ...okPayload, setup_commands: ["npm ci"] });
     await settle();
 
-    const opts = setupOpts(d);
-    if (opts !== undefined) expect(opts.env).toEqual(before);
+    expect(setupOpts(d)?.env).toEqual(before);
     expect(process.env).toEqual(before);
   });
 
@@ -954,7 +953,9 @@ describe("project env", () => {
 describe("RESERVED_ENV_KEYS", () => {
   // The names spec §5.3 says the sandbox must own outside the adapter
   // credentials (which the adapter packages pin against this set themselves).
-  it.each(["HOME", "PATH", "WORKSPACE_DIR", "THRONG_CONFIG", "THRONG_CREDS_CACHE"])("reserves %s", (key) => {
+  // THRONG_INIT_TOKEN is read per request by the control routes, after
+  // applyProjectEnv has run, and a blank value disables their auth.
+  it.each(["HOME", "PATH", "WORKSPACE_DIR", "THRONG_CONFIG", "THRONG_CREDS_CACHE", "THRONG_INIT_TOKEN"])("reserves %s", (key) => {
     expect(RESERVED_ENV_KEYS.has(key)).toBe(true);
   });
 });

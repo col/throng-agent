@@ -1,5 +1,5 @@
 ---
-"@throng/agent-core": patch
+"@throng/agent-core": minor
 "throng-agent-claude": patch
 "throng-agent-codex": patch
 "throng-agent": patch

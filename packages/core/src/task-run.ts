@@ -30,9 +30,18 @@ const ATTACHMENTS_DIRNAME = "attachments";
  *   starts the helper from the agent's shells after boot, and it locates the
  *   credential config through these in the environment it inherits.
  * - `PATH`, through which the engine SDK finds its own binary.
+ * - `THRONG_INIT_TOKEN`, which `control/server.ts` reads on EVERY request to
+ *   the control routes, not once at config build. `checkInitToken` treats a
+ *   blank value as "no auth configured", so a project setting it to "" would
+ *   switch off control-route authentication for the rest of the sandbox's life.
  *
- * The wrapper's own config variables (`PORT`, `LOG_LEVEL`, ...) are not here:
- * `applyProjectEnv` runs after the config is built, so ordering protects them.
+ * Ordering is the other half of the guarantee, and it covers less than it may
+ * appear to. `applyProjectEnv` runs after `buildAgentConfig`, so a variable
+ * read while the config is built has already been read: `A2A_PORT`,
+ * `ADVERTISE_HOST`, `ADVERTISE_PROTOCOL`, `WORKSPACE_DIR`, and the wrapper's
+ * `loadEnvOverrides` keys such as `PORT` and `LOG_LEVEL`. Those may be left
+ * out of this set. Anything read lazily, after boot, sees the project's value
+ * and must be listed here instead — which is why `THRONG_INIT_TOKEN` is.
  *
  * Mirrored on the control plane by
  * `Throng.Projects.Project.Validations.EnvironmentVariableKeys` in throngx,
@@ -49,6 +58,7 @@ export const RESERVED_ENV_KEYS: ReadonlySet<string> = new Set([
   "THRONG_CREDS_CACHE",
   "WORKSPACE_DIR",
   "PATH",
+  "THRONG_INIT_TOKEN",
 ]);
 
 /**
@@ -247,8 +257,11 @@ export class TaskRun {
       //
       // Project `env` and `secrets` need no equivalent step: on this path they
       // reach setup commands only through runSetup's explicit `env` option and
-      // never enter `process.env`, so there is nothing to unset before the
-      // snapshot captures this process's memory.
+      // never enter `process.env`, so `process.env` holds no project value and
+      // a sandbox restored from the snapshot inherits none. That is the
+      // environment only, not the heap: like the token above, the parsed
+      // manifest (secret values included) may still be unreclaimed garbage in
+      // the captured memory.
       log.info("prepare step: deleting the credential config and token cache");
       try {
         this.deps.deleteCredentialConfig();
@@ -317,11 +330,15 @@ export class TaskRun {
    *
    * The position in `boot()` is load-bearing on both sides:
    *
-   * - AFTER `buildAgentConfig`, because the wrapper reads its own settings
-   *   (`PORT`, `LOG_LEVEL`, `HOSTNAME`, ...) from `process.env` while building
-   *   the config. Applied earlier, a project variable of the same name would
-   *   reconfigure the agent server; applied here, those are ordinary variables
-   *   a project may set. Also after `injectCredentials`, so together with the
+   * - AFTER `buildAgentConfig`, because settings read while the config is
+   *   built (`A2A_PORT`, `ADVERTISE_HOST`, `ADVERTISE_PROTOCOL`,
+   *   `WORKSPACE_DIR`, the wrapper's `loadEnvOverrides` keys such as `PORT` and
+   *   `LOG_LEVEL`) have then already been read. Applied earlier, a project
+   *   variable of the same name would reconfigure the agent server. This
+   *   protects ONLY settings read during config build: anything read lazily
+   *   sees the project's value, so it has to be in `RESERVED_ENV_KEYS`
+   *   (`THRONG_INIT_TOKEN` is there for that reason). Also after
+   *   `injectCredentials`, so together with the
    *   reserved credential names the adapter's "selected credential wins,
    *   competitors scrubbed" guarantee cannot be disturbed.
    * - BEFORE `createA2AServer`, because what the server spawns inherits the
