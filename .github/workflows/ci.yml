@@ -5,18 +5,22 @@ on:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with: { node-version: "20", cache: "npm" }
-      # throng-agent-claude depends on @col/a2a-claude, a private GitHub Packages
-      # package. The committed .npmrc reads its auth token from $GITHUB_TOKEN, so
-      # feed the read:packages PAT (repo secret PACKAGES_TOKEN) through that var
-      # for the install step. GitHub Packages requires auth for all npm
-      # downloads, even public packages.
+      # throng-agent-claude depends on @col/a2a-claude from GitHub Packages. The
+      # committed .npmrc reads its auth token from $GITHUB_TOKEN, and GitHub
+      # Packages requires auth for every npm download, even of a public package.
+      # The package is public, so the workflow's own token (with the
+      # `packages: read` permission above) is enough; the PACKAGES_TOKEN PAT this
+      # used to rely on had expired and failed every run since 2026-11-14.
       - run: npm ci
         env:
-          GITHUB_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm run build
       # The Dockerfile installs /usr/local/bin/throng-creds and /usr/local/bin/gh
       # from packages/core/dist/creds. Nothing but the `cp && chmod` tail of

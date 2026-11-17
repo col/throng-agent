@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteCredentialConfig, writeCredentialConfig } from "./creds/config.js";
-import { TaskRun, resolveWorkingDirectory, type BootDeps } from "./task-run.js";
+import { log } from "./log.js";
+import { RESERVED_ENV_KEYS, TaskRun, resolveWorkingDirectory, type BootDeps } from "./task-run.js";
 import type { EngineAdapter, ServerHandle } from "./engine/adapter.js";
 import type { McpHttpServer, RepoSpec, WorkspaceManifest } from "./manifest/types.js";
 import type { McpProxyHandle } from "./mcp-proxy/index.js";
@@ -218,7 +219,7 @@ describe("TaskRun", () => {
     await tr.initialise({ ...okPayload, setup_commands: ["mise install"] });
     await settle();
     expect(order).toEqual(["ensure", "clone", "setup"]);
-    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"], expect.anything());
   });
 
   // The whole point of the feature: an agent asked to create a project from
@@ -251,7 +252,7 @@ describe("TaskRun", () => {
     const tr = new TaskRun(d, { claude: adapter() });
     await tr.initialise({ repos: [], agent: { platform: "claude" }, setup_commands: ["mise install"] });
     await settle();
-    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"], expect.anything());
   });
 
   // A zero-repo prepare is the reason the empty list is legal on that route too:
@@ -270,7 +271,7 @@ describe("TaskRun", () => {
     expect(r).toEqual({ ok: true, status: "booting" });
     await settle();
     expect(tr.lifecycle.status().state).toBe("prepared");
-    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"]);
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace", ["mise install"], expect.anything());
     expect(d.deleteCredentialConfig).toHaveBeenCalled();
   });
 
@@ -430,7 +431,7 @@ describe("TaskRun.prepare", () => {
 
     expect(tr.lifecycle.status().state).toBe("prepared");
     expect(d.syncOrClone).toHaveBeenCalledWith("https://x/y", "/home/user/workspace/y", "main");
-    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"]);
+    expect(d.runSetupCommands).toHaveBeenCalledWith("/home/user/workspace/y", ["mise install"], expect.anything());
     // Nothing task-specific and no LLM credential may reach a snapshot, and the
     // A2A server must not be serving in an image every task boots from.
     expect(claude.createA2AServer).not.toHaveBeenCalled();
@@ -734,5 +735,242 @@ describe("resolveWorkingDirectory", () => {
   it("throws when a non-empty list has no primary", () => {
     const m = manifest([{ url: "https://x/a", ref: "main", dest: "a", primary: false }]);
     expect(() => resolveWorkingDirectory(m, root)).toThrow(/no repo was marked primary/);
+  });
+});
+
+// Spec §5.3, "Two injection points, deliberately not one". Setup commands get
+// project env through an explicit `env` option on both paths; `process.env` is
+// written only on boot, after `buildAgentConfig` and before the A2A server, so
+// the wrapper builds its config from an unpolluted environment and a prepared
+// snapshot never carries a project value in memory. The ordering assertions are
+// taken inside the spies, not from the end state, because the end state of a
+// boot that applied the variables too early is indistinguishable from a correct
+// one.
+describe("project env", () => {
+  let savedEnv: NodeJS.ProcessEnv;
+  beforeEach(() => {
+    savedEnv = { ...process.env };
+    // vitest sets NODE_ENV=test itself, which would make "the manifest put it
+    // there" indistinguishable from "it was already there".
+    delete process.env.NODE_ENV;
+    delete process.env.NPM_TOKEN;
+  });
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
+    Object.assign(process.env, savedEnv);
+    vi.restoreAllMocks();
+  });
+
+  type SetupOpts = { env?: NodeJS.ProcessEnv; secretValues?: readonly string[] } | undefined;
+  const setupOpts = (d: BootDeps): SetupOpts =>
+    (d.runSetupCommands as ReturnType<typeof vi.fn>).mock.calls[0]![2] as SetupOpts;
+
+  const projectVars = { env: { NODE_ENV: "test" }, secrets: { NPM_TOKEN: "x" } };
+
+  it("passes env and secrets to setup commands on boot", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ ...okPayload, setup_commands: ["npm ci"], ...projectVars });
+    await settle();
+
+    const opts = setupOpts(d);
+    expect(opts?.env?.NODE_ENV).toBe("test");
+    expect(opts?.env?.NPM_TOKEN).toBe("x");
+    expect(opts?.secretValues).toEqual(["x"]);
+    // Merged over the process environment, not instead of it: a setup command
+    // without PATH cannot find `npm`.
+    expect(opts?.env?.PATH).toBe(process.env.PATH);
+  });
+
+  it("passes the process environment unchanged when both are empty", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    const before = { ...process.env };
+    await tr.initialise({ ...okPayload, setup_commands: ["npm ci"] });
+    await settle();
+
+    expect(setupOpts(d)?.env).toEqual(before);
+    expect(process.env).toEqual(before);
+  });
+
+  it("does not touch process.env before buildAgentConfig", async () => {
+    const seen: Record<string, string | undefined> = {};
+    const d = deps({
+      runSetupCommands: vi.fn(async () => {
+        seen.setup = process.env.NODE_ENV;
+        return { ok: true as const };
+      }),
+    });
+    const claude = adapter({
+      buildAgentConfig: vi.fn(() => {
+        seen.buildAgentConfig = process.env.NODE_ENV;
+        seen.buildAgentConfigSecret = process.env.NPM_TOKEN;
+        return {};
+      }),
+    });
+    const tr = new TaskRun(d, { claude });
+    await tr.initialise({ ...okPayload, ...projectVars });
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("ready");
+    expect(claude.buildAgentConfig).toHaveBeenCalledOnce();
+    expect(seen).toEqual({ setup: undefined, buildAgentConfig: undefined, buildAgentConfigSecret: undefined });
+  });
+
+  it("populates process.env before the server starts", async () => {
+    const order: string[] = [];
+    const claude = adapter({
+      buildAgentConfig: vi.fn(() => {
+        order.push(`buildAgentConfig NODE_ENV=${process.env.NODE_ENV}`);
+        return {};
+      }),
+      createA2AServer: vi.fn(async () => {
+        order.push(`createA2AServer NODE_ENV=${process.env.NODE_ENV} NPM_TOKEN=${process.env.NPM_TOKEN}`);
+        return handle;
+      }),
+    });
+    const tr = new TaskRun(deps(), { claude });
+    await tr.initialise({ ...okPayload, ...projectVars });
+    await settle();
+
+    expect(order).toEqual([
+      "buildAgentConfig NODE_ENV=undefined",
+      "createA2AServer NODE_ENV=test NPM_TOKEN=x",
+    ]);
+    expect(process.env.NODE_ENV).toBe("test");
+  });
+
+  it("the manifest credential wins", async () => {
+    const warn = vi.spyOn(log, "warn");
+    const d = deps();
+    const claude = adapter({
+      injectCredentials: vi.fn(() => {
+        process.env.ANTHROPIC_API_KEY = "from-manifest";
+      }),
+    });
+    const tr = new TaskRun(d, { claude });
+    await tr.initialise({ ...okPayload, env: { ANTHROPIC_API_KEY: "evil" } });
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("ready");
+    expect(process.env.ANTHROPIC_API_KEY).toBe("from-manifest");
+    expect(setupOpts(d)?.env?.ANTHROPIC_API_KEY).not.toBe("evil");
+    expect(warn).toHaveBeenCalledWith("project env key skipped", { key: "ANTHROPIC_API_KEY" });
+  });
+
+  it("skips reserved keys with a warning", async () => {
+    const warn = vi.spyOn(log, "warn");
+    const d = deps();
+    const path = process.env.PATH;
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ ...okPayload, env: { PATH: "/evil", NODE_ENV: "test" } });
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("ready");
+    expect(process.env.PATH).toBe(path);
+    expect(setupOpts(d)?.env?.PATH).toBe(path);
+    // The rest of the map still applies; one reserved key does not void it.
+    expect(process.env.NODE_ENV).toBe("test");
+    expect(warn).toHaveBeenCalledWith("project env key skipped", { key: "PATH" });
+    // Once per run, not once per injection point: boot applies the map in two
+    // places (setup and process.env) but filters it once.
+    expect(warn.mock.calls.filter(([msg]) => msg === "project env key skipped")).toHaveLength(1);
+    // Names the key, never the value.
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("/evil");
+  });
+
+  it("prepare passes env to setup but leaves process.env unchanged at prepared", async () => {
+    const d = deps();
+    const tr = new TaskRun(d, { claude: adapter() });
+    const before = { ...process.env };
+    // Captured at the transition itself: the control plane snapshots the
+    // moment it sees `prepared`, so that instant is the one that matters.
+    let atPrepared: NodeJS.ProcessEnv | undefined;
+    const set = tr.lifecycle.set.bind(tr.lifecycle);
+    vi.spyOn(tr.lifecycle, "set").mockImplementation((state) => {
+      if (state === "prepared") atPrepared = { ...process.env };
+      set(state);
+    });
+
+    await tr.prepare({ ...preparePayload, ...projectVars });
+    await settle();
+
+    expect(tr.lifecycle.status().state).toBe("prepared");
+    const opts = setupOpts(d);
+    expect(opts?.env?.NODE_ENV).toBe("test");
+    expect(opts?.env?.NPM_TOKEN).toBe("x");
+    expect(opts?.secretValues).toEqual(["x"]);
+    expect(atPrepared).toEqual(before);
+    expect(process.env).toEqual(before);
+  });
+
+  // The setup failure message becomes the control plane's
+  // `instance.error_message`, so a command that echoes a secret must not carry
+  // it there.
+  it("redacts secret values from a setup failure message", async () => {
+    const secret = "s3cr3t-npm-token-value";
+    const d = deps({
+      runSetupCommands: vi.fn(async () => ({
+        ok: false as const,
+        command: `echo ${secret}`,
+        code: 1,
+        signal: null,
+        output: `auth failed for ${secret}\n`,
+      })),
+    });
+    const tr = new TaskRun(d, { claude: adapter() });
+    await tr.initialise({ ...okPayload, setup_commands: ["npm ci"], secrets: { NPM_TOKEN: secret } });
+    await settle();
+
+    const status = tr.lifecycle.status();
+    expect(status.error?.step).toBe("setup");
+    expect(status.error?.message).not.toContain(secret);
+    expect(status.error?.message).toContain("[REDACTED]");
+  });
+
+  it("logs counts, never values", async () => {
+    const lines: string[] = [];
+    for (const stream of ["log", "warn", "error"] as const) {
+      vi.spyOn(console, stream).mockImplementation((...args: unknown[]) => void lines.push(String(args[0])));
+    }
+    const tr = new TaskRun(deps(), { claude: adapter() });
+    await tr.initialise({
+      ...okPayload,
+      env: { NODE_ENV: "plain-value-1", HOME: "/evil-home" },
+      secrets: { NPM_TOKEN: "secret-value-2" },
+    });
+    await settle();
+    const prep = new TaskRun(deps(), { claude: adapter() });
+    await prep.prepare({ ...preparePayload, env: { NODE_ENV: "plain-value-3" }, secrets: { NPM_TOKEN: "secret-value-4" } });
+    await settle();
+
+    const out = lines.join("\n");
+    expect(out).toContain('"envCount":2,"secretCount":1');
+    expect(out).toContain('"envCount":1,"secretCount":1');
+    for (const value of ["plain-value-1", "/evil-home", "secret-value-2", "plain-value-3", "secret-value-4"]) {
+      expect(out).not.toContain(value);
+    }
+  });
+});
+
+describe("RESERVED_ENV_KEYS", () => {
+  // The names spec §5.3 says the sandbox must own outside the adapter
+  // credentials (which the adapter packages pin against this set themselves).
+  // The rest are read lazily, after applyProjectEnv has run, so ordering
+  // cannot protect them: THRONG_INIT_TOKEN per control-route request (blank
+  // disables auth), GIT_TERMINAL_PROMPT by every git invocation, and
+  // THRONG_CREDS_BIN / GH_REAL_BIN by the gh shim on every `gh` call.
+  it.each([
+    "HOME",
+    "PATH",
+    "WORKSPACE_DIR",
+    "THRONG_CONFIG",
+    "THRONG_CREDS_CACHE",
+    "THRONG_INIT_TOKEN",
+    "GIT_TERMINAL_PROMPT",
+    "THRONG_CREDS_BIN",
+    "GH_REAL_BIN",
+  ])("reserves %s", (key) => {
+    expect(RESERVED_ENV_KEYS.has(key)).toBe(true);
   });
 });

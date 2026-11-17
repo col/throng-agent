@@ -212,6 +212,45 @@ function validateWorkspace(input: Record<string, unknown>, errors: FieldError[])
       });
     }
   }
+
+  validateEnvMap("env", input.env, errors);
+  validateEnvMap("secrets", input.secrets, errors);
+
+  // A key in both is ambiguous about which value wins, and only `secrets` is
+  // redacted, so the 400 names the secrets side. The control plane enforces the
+  // same rule; this is the sandbox's own guard.
+  if (isObject(input.env) && isObject(input.secrets)) {
+    for (const key of Object.keys(input.secrets)) {
+      if (Object.hasOwn(input.env, key)) errors.push({ field: `secrets.${key}`, reason: "also set in env" });
+    }
+  }
+}
+
+/** A POSIX environment variable name. */
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * The optional `env` / `secrets` maps; absent means none. Errors name the key
+ * and never the value: for `secrets` the value is the credential, and a 400
+ * body is logged and shown to whoever reads the control plane's response.
+ */
+export function validateEnvMap(
+  field: "env" | "secrets",
+  value: unknown,
+  errors: FieldError[],
+): void {
+  if (value === undefined) return;
+  if (!isObject(value)) {
+    errors.push({ field, reason: "must be an object of string values" });
+    return;
+  }
+  for (const [key, v] of Object.entries(value)) {
+    if (!ENV_KEY.test(key)) {
+      errors.push({ field: `${field}.${key}`, reason: "is not a valid environment variable name" });
+    } else if (typeof v !== "string") {
+      errors.push({ field: `${field}.${key}`, reason: "must be a string" });
+    }
+  }
 }
 
 /** Rules that need every repo at once; run only after the per-field ones pass. */
@@ -509,6 +548,9 @@ function buildWorkspaceManifest(
           url: a.url,
         }))
       : [],
+    // Already validated as string maps, so a copy is all that is left to do.
+    env: { ...(input.env as Record<string, string> | undefined) },
+    secrets: { ...(input.secrets as Record<string, string> | undefined) },
   };
 }
 

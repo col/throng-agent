@@ -142,6 +142,10 @@ export function startControlServer(registry: AdapterRegistry): Server {
   // server has to be listening and take an /api/initialise before any clone,
   // setup command or engine process exists.
   process.env.GIT_TERMINAL_PROMPT = "0";
+  // Protected from a project's `env` by RESERVED_ENV_KEYS (task-run.ts): git
+  // reads this lazily, long after applyProjectEnv has run, so ordering alone
+  // would let a project turn prompting back on.
+
   // `||`, matching WORKSPACE_DIR above: `Number("")` is 0, so `??` would turn a
   // blank CONTROL_PORT into "listen on a random port" — reachable by nothing,
   // and silent. The value never arrives from the image or the template under

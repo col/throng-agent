@@ -2,6 +2,8 @@ export { startControlServer, buildServer, createControlApp, defaultBootDeps } fr
 export {
   TaskRun,
   resolveWorkingDirectory,
+  projectEnv,
+  RESERVED_ENV_KEYS,
   type BootDeps,
   type BootAcceptance,
   type InitialiseResult,
@@ -32,7 +34,14 @@ export type {
 export type { EngineAdapter, ServerHandle, AgentResult, AdapterRegistry } from "./engine/adapter.js";
 export { homeDir, type Env } from "./env.js";
 export { clone, checkout, syncOrClone, type GitResult } from "./bootstrap/git.js";
-export { runSetupCommands, describeSetupFailure, redactTokens, type SetupResult } from "./bootstrap/setup.js";
+export {
+  runSetupCommands,
+  describeSetupFailure,
+  redactTokens,
+  redactSecrets,
+  type SetupOptions,
+  type SetupResult,
+} from "./bootstrap/setup.js";
 export { injectGitIdentity } from "./bootstrap/git-identity.js";
 export {
   writeCredentialConfig,

@@ -763,3 +763,92 @@ describe("validate (credential-bearing repo urls stay legal on initialise)", () 
     expect(r.ok).toBe(true);
   });
 });
+
+// Both routes share validateWorkspace, so each rule is pinned from the initialise
+// and the prepare side: a snapshot build and a task boot must not disagree about
+// what an env map means.
+describe.each([
+  {
+    route: "validate",
+    run: (extra: Record<string, unknown>) => validate({ ...okInput, ...extra }, registry, {}),
+  },
+  {
+    route: "validatePrepare",
+    run: (extra: Record<string, unknown>) =>
+      validatePrepare({ ...preparePayload, ...extra }, {}),
+  },
+])("env and secrets ($route)", ({ run }) => {
+  const errorsOf = (extra: Record<string, unknown>) => {
+    const r = run(extra);
+    if (r.ok) throw new Error("expected validation to fail");
+    return r.errors;
+  };
+
+  it("defaults both to empty", () => {
+    const r = run({});
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.manifest.env).toEqual({});
+      expect(r.manifest.secrets).toEqual({});
+    }
+  });
+
+  it("accepts string maps", () => {
+    const r = run({ env: { NODE_ENV: "test" }, secrets: { NPM_TOKEN: "x" } });
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.manifest.env).toEqual({ NODE_ENV: "test" });
+      expect(r.manifest.secrets).toEqual({ NPM_TOKEN: "x" });
+    }
+  });
+
+  it("rejects a non-object env", () => {
+    expect(errorsOf({ env: "x" })).toEqual([
+      { field: "env", reason: "must be an object of string values" },
+    ]);
+  });
+
+  it("rejects an array secrets", () => {
+    expect(errorsOf({ secrets: ["A"] })).toEqual([
+      { field: "secrets", reason: "must be an object of string values" },
+    ]);
+  });
+
+  it("rejects a non-string value and names only the key", () => {
+    const errors = errorsOf({ env: { A: 1 } });
+
+    expect(errors).toEqual([{ field: "env.A", reason: "must be a string" }]);
+    expect(JSON.stringify(errors)).not.toContain("1");
+  });
+
+  it("rejects a bad key", () => {
+    expect(errorsOf({ secrets: { "NODE ENV": "x" } })).toEqual([
+      { field: "secrets.NODE ENV", reason: "is not a valid environment variable name" },
+    ]);
+  });
+
+  it("never echoes a value, even when the key is also bad", () => {
+    const errors = errorsOf({ env: { "9X": "hunter2" }, secrets: { B: { nested: "hunter2" } } });
+
+    expect(errors.map((e) => e.field)).toEqual(["env.9X", "secrets.B"]);
+    expect(JSON.stringify(errors)).not.toContain("hunter2");
+  });
+
+  it("rejects a key present in both", () => {
+    expect(errorsOf({ env: { X: "1" }, secrets: { X: "2" } })).toEqual([
+      { field: "secrets.X", reason: "also set in env" },
+    ]);
+  });
+
+  // `key in env` walks the prototype chain, so these would be falsely "also set in env".
+  it.each(["toString", "constructor", "valueOf", "hasOwnProperty"])(
+    "accepts a secret named %s when env does not define it",
+    (name) => {
+      const r = run({ env: { NODE_ENV: "test" }, secrets: { [name]: "x" } });
+
+      expect(r.ok).toBe(true);
+    },
+  );
+});
